@@ -1,0 +1,31 @@
+STATE-LEVEL SEVERITY MODELING RESULTS
+============================================================
+
+Severity definition: combined
+Total states: 48
+Total events analyzed: 824993
+
+Summary statistics:
+  Mean P(severe): 0.1309
+  Std P(severe): 0.0830
+  Min P(severe): 0.0043
+  Max P(severe): 0.3857
+
+Top 10 states by P(severe):
+  46. West Virginia  : 0.3857 [0.3778, 0.3937]
+  24. Montana        : 0.3154 [0.2976, 0.3337]
+  39. South Dakota   : 0.2804 [0.2604, 0.2999]
+   3. Arkansas       : 0.2492 [0.2428, 0.2560]
+  43. Vermont        : 0.2273 [0.2142, 0.2401]
+  10. Idaho          : 0.2225 [0.2121, 0.2332]
+  15. Kentucky       : 0.2191 [0.2133, 0.2246]
+  22. Mississippi    : 0.2159 [0.2096, 0.2227]
+  44. Virginia       : 0.2118 [0.2076, 0.2161]
+  48. Wyoming        : 0.1902 [0.1717, 0.2084]
+
+============================================================
+INTERPRETATION:
+  P(severe) = Probability that an outage event is severe
+  Severe = Duration > 2h AND Customer impact > 1% of county
+  Use this metric to assess state-level risk in combination with
+  frequency (lambda) and network vulnerability.

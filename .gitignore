@@ -1,0 +1,76 @@
+########################
+# Python / 环境文件
+########################
+
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# 虚拟环境（如果你在项目里建 env，可以取消注释）
+# .venv/
+# venv/
+# env/
+
+########################
+# 数据文件（不上传原始/中间/结果数据）
+########################
+
+# 通用数据格式
+*.csv
+*.parquet
+*.xlsx
+*.xls
+*.pkl
+*.pickle
+*.feather
+*.h5
+*.hdf5
+*.sav
+
+# 项目内常见数据目录
+data/
+outputs/
+notebooks/PO_data_cleaning/*.csv
+analysis/**/data/
+analysis/attack_under_PO/demographic data/
+
+########################
+# Jupyter / IDE
+########################
+
+*.ipynb
+**/.ipynb_checkpoints/
+
+.vscode/
+.idea/
+
+########################
+# 其它大文件
+########################
+
+*.zip
+*.tar
+*.tar.gz
+*.7z
+
+*.png
+*.jpg
+*.jpeg
+*.tif
+*.tiff
+*.mp4
+*.mov
+
+# GIS / shapefile 等空间数据
+*.shp
+*.shx
+*.dbf
+*.prj
+*.sbx
+*.sbn

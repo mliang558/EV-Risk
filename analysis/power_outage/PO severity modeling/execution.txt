@@ -1,0 +1,1 @@
+python bayesian_severity_model.py full_pop_2022.csv

@@ -1,0 +1,8 @@
+C:\Users\maple\Desktop\EV_Project\codes\module 1\new\results_fixed\network_structures\AL_graph.pkl
+C:\Users\maple\Desktop\EV_Project\codes\module 2\PO frequency modeling\county_level\all_states_final\county_estimates_advi.csv
+C:\Users\maple\Desktop\EV_Project\codes\module 2\PO severity modeling\cleaned_data_1117.csv
+C:\Users\maple\Desktop\EV_Project\codes\module_3_03\demographic data\merged_output.csv
+C:\Users\maple\Desktop\EV_Project\codes\module_3_03\test\converted_data.pkl
+
+
+C:\Users\maple\Desktop\EV_Project\codes\module 1\new\results_fixed\network_structures

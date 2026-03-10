@@ -1,0 +1,25 @@
+STATE-LEVEL FREQUENCY MODELING SUMMARY
+============================================================
+
+Total states analyzed: 49
+Total events: 831352
+Average years observed: 6.0
+
+Lambda statistics (events per year):
+  Mean: 2827.72
+  Median: 2048.71
+  Min: 231.36
+  Max: 13966.50
+  Std: 2804.94
+
+Top 10 highest risk states (with 95% credible intervals):
+  Texas: 13966.50 [13869.57, 14068.22]
+  California: 10030.44 [9952.84, 10108.01]
+  Florida: 9720.27 [9640.85, 9797.88]
+  Pennsylvania: 6362.13 [6299.56, 6425.47]
+  Georgia: 5966.87 [5906.26, 6028.09]
+  Ohio: 5385.72 [5327.62, 5444.76]
+  New York: 5341.93 [5284.92, 5398.63]
+  North Carolina: 5243.21 [5185.27, 5300.44]
+  Virginia: 5234.55 [5174.25, 5294.46]
+  Louisiana: 4771.74 [4713.65, 4825.86]

@@ -1,0 +1,79 @@
+# Configuration for State-Level Frequency Modeling
+# ================================================
+# NOTE: For Windows paths, use forward slashes (/) or escape backslashes (\\)
+# Good: "C:/Users/data.csv" or 'C:\Users\data.csv' (single quotes)
+# Bad:  "C:\Users\data.csv" (double quotes with backslash causes YAML errors)
+
+# Data Configuration
+data:
+  # Path to your cleaned outage data CSV file
+  # Use forward slashes or single quotes with backslashes
+  input_path: "cleaned_data_1117.csv"
+  
+  # Column name mappings (map your CSV columns to expected field names)
+  columns:
+    fips: "fips"                    # County FIPS code
+    state: "state"                  # State abbreviation
+    county: "county"                # County name (optional)
+    start_time: "start_time"        # Event start timestamp
+    end_time: "end_time"            # Event end timestamp (optional)
+    duration_min: "duration_min"    # Duration in minutes
+    customers_affected: "mean_customers"  # Number of customers affected
+    
+  # Data filtering (optional)
+  filters:
+    min_duration_min: 0             # Minimum duration to include (minutes)
+    max_duration_min: null          # Maximum duration to include (null = no limit)
+    min_customers: 0                # Minimum customers affected
+    states_to_exclude: []           # List of state codes to exclude, e.g., ['AK', 'HI']
+
+# Model Configuration
+model:
+  # Prior hyperparameters
+  priors:
+    mu_national_mean: 1.6094        # log(5) - national mean events per year
+    mu_national_sigma: 2.0          # Uncertainty in national mean
+    sigma_state: 1.0                # Between-state variation
+    sigma_county: 0.8               # Within-state (county) variation (not used in state-only model)
+  
+  # MCMC sampling parameters
+  sampling:
+    n_samples: 2000                 # Number of posterior samples
+    n_tune: 1000                    # Number of tuning/warmup samples
+    target_accept: 0.95             # Target acceptance rate (0.8-0.99)
+    cores: null                     # CPU cores (null = auto-detect, 1 for Windows)
+    random_seed: 42                 # Random seed for reproducibility
+
+# Output Configuration
+output:
+  # Output directory for results (use forward slashes for Windows)
+  output_dir: "./results"
+  
+  # Output file options
+  save_trace: false                 # Save full MCMC trace (can be large)
+  save_diagnostics: true            # Save convergence diagnostics
+  
+  # Plotting options
+  plots:
+    create_plots: true              # Generate visualization plots
+    dpi: 300                        # Plot resolution
+    figure_format: "png"            # Format: png, pdf, svg
+    
+  # Results export
+  export:
+    csv: true                       # Export results to CSV
+    json: false                     # Export results to JSON
+    summary_text: true              # Generate summary statistics text file
+
+# Advanced Options
+advanced:
+  # Aggregation method for state-level metrics
+  duration_aggregation: "weighted_mean"  # Options: mean, weighted_mean, median
+  duration_weight_column: "mean_customers"  # Column to use for weighted mean
+  
+  # Confidence interval level
+  credible_interval: 0.95           # 95% credible interval (can change to 0.90, etc.)
+  
+  # Logging
+  verbose: true                     # Print detailed progress
+  log_file: null                    # Log file path (null = no log file)

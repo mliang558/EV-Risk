@@ -6,7 +6,7 @@ Analysis of electric vehicle (EV) charging infrastructure vulnerability to power
 
 This project investigates resilience of EV charging networks through:
 - **Network analysis** on AFDC charging station data (2018-2026, 49 states)
-- **Power outage modeling** using 10 years of historical EAGLEI data (2014-2023)
+- **Bayesian power outage modeling** using 10 years of historical EAGLEI data (2014-2023)
 - **Attack simulations** combining targeted node removal with realistic outage scenarios
 
 ## Project Structure

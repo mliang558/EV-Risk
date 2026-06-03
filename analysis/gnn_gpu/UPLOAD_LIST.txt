@@ -1,0 +1,55 @@
+# Upload to server: /opt/data_repo/mliang_work/step4_gpu/
+# Local source: analysis/gnn_gpu/
+
+## A) step4_gpu/gnn/  (Python package — 12 files)
+
+gnn/__init__.py
+gnn/constants.py
+gnn/attack_targets.py
+gnn/train_utils.py
+gnn/models.py
+gnn/metrics.py
+gnn/edge_utils.py
+gnn/global_graph_features.py
+gnn/local_window_features.py
+gnn/mlflow_utils.py
+gnn/splits.py
+gnn/dataset.py
+gnn/node_features.py
+
+## B) step4_gpu/  (scripts at ROOT, not inside gnn/)
+
+step5_build_window_global_features.py
+step6_train_gnn.py
+step6_probe_bus.py
+step7_evaluate_gnn.py
+step7_window_lgb_baseline.py
+step7_build_comparison_table.py
+step7_compare_single_vs_multitask.py
+step7_build_enhancement_report.py
+run_all_experiments.sh          *** 一键 smoke + 全量训练 ***
+step7_leave_one_state_out.py    *** LOO 泛化 ***
+step7_r2_by_radius.py           *** 10/30/80 km 敏感性 ***
+
+## C) optional
+
+step7_window_lgb_optuna.py
+step8_benchmark_speed.py
+verify_gnn_upload.py
+experiments/enhancement_manifest.json
+ENHANCEMENT_EXPERIMENTS.md
+
+## DO NOT upload
+
+- gnn_gpu/gnn/gnn/          (deleted locally)
+- gnn_gpu/gnn/step*.py      (deleted locally)
+- gnn_gpu/step3_*.py step4_*.py step5_build_pyg*.py  (data pipeline; only if rebuilding data)
+- gnn_gpu/constants.py at root (deleted — use gnn/constants.py)
+
+## Server layout after upload
+
+step4_gpu/
+  gnn/          <- section A
+  step6_*.py    <- section B
+  pyg/pyg_dataset.pt      (keep, do not upload)
+  subgraphs/ labels/      (keep)

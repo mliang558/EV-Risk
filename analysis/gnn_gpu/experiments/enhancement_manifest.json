@@ -1,0 +1,58 @@
+{
+  "description": "Enhancement sweep: GNN depths + Transformer + single-task + LightGBM extended",
+  "experiments": [
+    {
+      "label": "LightGBM + Global (ext 18)",
+      "eval_json": "lgbm/train_lgbm_ext_br/lgb_report.json",
+      "notes": "Row 9 — strongest non-graph baseline; same 18 global feats as GAT+Global"
+    },
+    {
+      "label": "GAT L2 + global ext",
+      "eval_json": "results_gnn/eval_train_gat_global_L2_ext_br/test_metrics.json",
+      "ckpt": "pyg/train_gat_global_L2_ext_br/best_model.pt",
+      "notes": "2-layer"
+    },
+    {
+      "label": "GAT L4 + global ext",
+      "eval_json": "results_gnn/eval_train_gat_global_L4_ext_br/test_metrics.json",
+      "ckpt": "pyg/train_gat_global_L4_ext_br/best_model.pt",
+      "notes": "4-layer"
+    },
+    {
+      "label": "GAT L5 + global ext",
+      "eval_json": "results_gnn/eval_train_gat_global_L5_ext_br/test_metrics.json",
+      "ckpt": "pyg/train_gat_global_L5_ext_br/best_model.pt",
+      "notes": "5-layer multi-task B+R"
+    },
+    {
+      "label": "Graph Transformer L4",
+      "eval_json": "results_gnn/eval_train_gt_global_L4_ext_br/test_metrics.json",
+      "ckpt": "pyg/train_gt_global_L4_ext_br/best_model.pt",
+      "notes": "transformer"
+    },
+    {
+      "label": "GCN L4",
+      "eval_json": "results_gnn/eval_train_gcn_global_L4_ext_br/test_metrics.json",
+      "ckpt": "pyg/train_gcn_global_L4_ext_br/best_model.pt",
+      "notes": "gcn"
+    },
+    {
+      "label": "MLP + global ext",
+      "eval_json": "results_gnn/eval_train_mlp_global_ext_br/test_metrics.json",
+      "ckpt": "pyg/train_mlp_global_ext_br/best_model.pt",
+      "notes": "no graph conv"
+    },
+    {
+      "label": "GAT L5 single-task B",
+      "eval_json": "results_gnn/eval_train_gat_global_L5_ext_betweenness/test_metrics.json",
+      "ckpt": "pyg/train_gat_global_L5_ext_betweenness/best_model.pt",
+      "notes": "all windows; labels=y_betweenness_* only"
+    },
+    {
+      "label": "GAT L5 single-task R",
+      "eval_json": "results_gnn/eval_train_gat_global_L5_ext_random/test_metrics.json",
+      "ckpt": "pyg/train_gat_global_L5_ext_random/best_model.pt",
+      "notes": "all windows; labels=y_random_* only"
+    }
+  ]
+}

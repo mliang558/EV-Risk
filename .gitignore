@@ -32,6 +32,16 @@ build/
 *.h5
 *.hdf5
 *.sav
+*.joblib
+*.nc
+
+# ML / 演示输出（不上传）
+results_ml_demo*/
+advi_results*/
+analysis/gnn_gpu/lgb_fastapi_ui/artifacts/
+analysis/**/mlruns/
+analysis/**/pyg/
+analysis/**/subgraphs/
 
 # 项目内常见数据目录
 data/

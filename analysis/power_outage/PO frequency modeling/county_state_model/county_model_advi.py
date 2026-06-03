@@ -74,8 +74,9 @@ def build_hierarchical_model(county_data):
     print("BUILDING HIERARCHICAL MODEL")
     print("="*70)
     
-    n_states = county_data['state_idx'].max() + 1
-    n_counties = len(county_data)
+    # Cast to plain Python ints to satisfy PyMC shape requirements
+    n_states = int(county_data['state_idx'].max() + 1)
+    n_counties = int(len(county_data))
     
     Y_obs = county_data['n_events'].values.astype(int)
     T_obs = county_data['n_years'].values.astype(float)
@@ -97,7 +98,7 @@ def build_hierarchical_model(county_data):
             "mu_state",
             mu=mu_data,
             sigma=sigma_data * 2,
-            shape=n_states
+            shape=int(n_states),
         )
         
         # County level
@@ -107,7 +108,7 @@ def build_hierarchical_model(county_data):
             "log_lambda_county",
             mu=mu_state[state_idx],
             sigma=sigma_county,
-            shape=n_counties
+            shape=int(n_counties),
         )
         
         lambda_county = pm.Deterministic(
@@ -425,6 +426,13 @@ def run_advi_model(data_path, output_dir='./advi_results',
     
     # Fit with ADVI (fast!)
     trace, approx = fit_with_advi(model, n_iterations)
+
+    # Persist full approximate posterior for downstream use
+    output_path = Path(output_dir)
+    output_path.mkdir(exist_ok=True, parents=True)
+    posterior_file = output_path / "county_advi_posterior.nc"
+    az.to_netcdf(trace, posterior_file)
+    print(f"✓ Saved full posterior samples to: {posterior_file}")
     
     # Extract results
     county_df, state_df = extract_results(trace, county_data, use_hdi=use_hdi)
@@ -435,7 +443,7 @@ def run_advi_model(data_path, output_dir='./advi_results',
     # Plots
     create_diagnostic_plots(county_df, state_df, approx, output_dir)
     
-    # Save
+    # Save summaries
     save_results(county_df, state_df, output_dir)
     
     # Summary

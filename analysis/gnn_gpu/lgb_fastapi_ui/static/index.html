@@ -1,0 +1,1254 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>EV Window Explorer</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet.draw/1.0.4/leaflet.draw.css" />
+  <style>
+    :root {
+      --bg: #0a0e14; --panel: #141b26; --border: #2a3548; --text: #e8edf4; --muted: #8b9cb3;
+      --accent: #3b82f6; --highlight: #f97316;
+      --urban: #22c55e; --suburban: #eab308; --rural: #a855f7;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: "Segoe UI", system-ui, sans-serif; background: var(--bg); color: var(--text);
+      height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
+    header { padding: 10px 16px; border-bottom: 1px solid var(--border); flex-shrink: 0; background: #0d1118; }
+    header h1 { font-size: 1.1rem; margin: 0; font-weight: 600; }
+    header .sub { color: var(--muted); font-size: 0.85rem; }
+    .main { flex: 1; display: grid; grid-template-columns: 1fr 168px 300px; min-height: 0; }
+    .aside-top {
+      border-left: 1px solid var(--border); background: var(--panel);
+      overflow-y: auto; padding: 10px; min-height: 0;
+    }
+    .aside-main {
+      border-left: 1px solid var(--border); background: var(--panel);
+      overflow-y: auto; padding: 12px; min-height: 0;
+      display: flex; flex-direction: column; gap: 12px;
+    }
+    #mapWrap { position: relative; min-height: 0; }
+    #map { width: 100%; height: 100%; background: #0a0a0a; }
+    .map-toolbar {
+      position: absolute; top: 10px; left: 10px; z-index: 800;
+      background: rgba(20, 27, 38, 0.96); border: 1px solid var(--border); border-radius: 8px;
+      padding: 8px 10px; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; font-size: 12px; max-width: calc(100% - 20px);
+    }
+    .map-toolbar label { display: flex; align-items: center; gap: 4px; color: var(--muted); }
+    .map-toolbar select, .map-toolbar input {
+      background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 4px; padding: 4px 6px;
+    }
+    .map-toolbar button { background: var(--accent); color: #fff; border: none; border-radius: 4px; padding: 5px 10px; cursor: pointer; font-size: 12px; }
+    .map-toolbar button.secondary { background: #1e293b; border: 1px solid var(--border); color: var(--text); }
+    .map-toolbar button.mode-active { background: #1e3a5f; border-color: #60a5fa; color: #93c5fd; }
+    .legend {
+      position: absolute; bottom: 12px; left: 10px; z-index: 800;
+      background: rgba(20, 27, 38, 0.96); border: 1px solid var(--border); border-radius: 8px;
+      padding: 10px 12px; font-size: 11px; color: var(--muted); line-height: 1.6; max-width: 340px;
+    }
+    .legend-title { font-weight: 600; color: var(--text); margin-bottom: 6px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; }
+    .legend-row { display: flex; align-items: center; gap: 8px; margin: 4px 0; }
+    .legend-swatch { width: 28px; height: 14px; border-radius: 3px; border: 1px solid rgba(255,255,255,0.15); flex-shrink: 0; }
+    .legend span.dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 4px; vertical-align: middle; }
+    .perf-gradient {
+      height: 10px; width: 140px; border-radius: 3px;
+      background: linear-gradient(90deg, #ef4444, #eab308, #22c55e);
+      margin: 4px 0;
+    }
+    .card { border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; background: rgba(10, 14, 20, 0.6); }
+    .card h3 { margin: 0 0 8px; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); }
+    button.side { width: 100%; padding: 8px; margin-top: 6px; background: var(--accent); color: #fff; border: none; border-radius: 6px; cursor: pointer; font-size: 13px; pointer-events: auto; }
+    button.side.secondary { background: #1e293b; border: 1px solid var(--border); color: var(--text); }
+    button.side:disabled { opacity: 0.55; cursor: wait; }
+    #analyzeBtn { position: relative; z-index: 5; }
+    .status { font-size: 12px; color: var(--muted); }
+    .status.ok { color: #4ade80; }
+    .status.err { color: #f87171; }
+    input[type="text"] { width: 100%; padding: 7px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font-size: 13px; }
+    .selected-box { border-color: var(--highlight); box-shadow: 0 0 0 1px var(--highlight); }
+    .probe-coords { font-family: ui-monospace, monospace; font-size: 11px; color: #94a3b8; margin-top: 6px; }
+    .chart-wrap { position: relative; margin-top: 8px; }
+    #curveChart { width: 100%; height: 240px; background: var(--bg); border-radius: 6px; display: block; }
+    #chartHover { font-size: 11px; color: var(--muted); min-height: 16px; margin-top: 4px; }
+    .chart-legend { display: flex; gap: 12px; font-size: 11px; margin-top: 4px; flex-wrap: wrap; }
+    .top-item { cursor: pointer; padding: 5px 6px; border-radius: 4px; margin-bottom: 4px; font-size: 12px; border-left: 4px solid transparent; }
+    .top-item:hover { background: rgba(255,255,255,0.05); }
+    #metricsOut { font-size: 11px; white-space: pre-wrap; margin: 8px 0 0; max-height: 100px; overflow: auto; }
+    #topList { max-height: calc(100vh - 220px); overflow-y: auto; font-size: 11px; }
+    .chart-empty { font-size: 12px; color: var(--muted); padding: 24px 8px; text-align: center; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Sliding-window resilience explorer</h1>
+    <span class="sub">Census tract strata (boundaries) · optional window disks · probe click</span>
+  </header>
+
+  <div class="main">
+    <div id="mapWrap">
+      <div id="map"></div>
+      <div class="map-toolbar">
+        <label><input type="checkbox" id="showStations" checked /> Stations</label>
+        <label><input type="checkbox" id="showStratumBoundaries" /> Stratum boundaries</label>
+        <label><input type="checkbox" id="showWindows" /> Window disks</label>
+        <label>Display
+          <select id="winDisplay">
+            <option value="outline">Outline only</option>
+            <option value="light" selected>Light fill</option>
+            <option value="zoom">Zoom ≥7 only</option>
+          </select>
+        </label>
+        <label><input type="checkbox" id="winDedupe" checked /> De-overlap</label>
+        <label>Stratum
+          <select id="filterStratum">
+            <option value="">All</option>
+            <option value="urban">Urban 10km</option>
+            <option value="suburban">Suburban 30km</option>
+            <option value="rural">Rural 80km</option>
+          </select>
+        </label>
+        <label>Max <input id="winLimit" type="number" value="800" min="50" max="5000" style="width:56px" /></label>
+        <button id="reloadMapBtn">Reload</button>
+        <button id="clearSelBtn" class="secondary">Clear</button>
+        <span style="border-left:1px solid var(--border);height:20px"></span>
+        <button id="modeProbeBtn" class="secondary mode-btn mode-active" title="Click map: coords → stratum → radius → predict">Probe click</button>
+        <button id="modeClickBtn" class="secondary mode-btn">Select window</button>
+        <button id="modeCircleBtn" class="secondary mode-btn">Draw circle</button>
+        <button id="modePolyBtn" class="secondary mode-btn">Draw territory</button>
+        <button id="heatmapBtn">Heatmap</button>
+        <label><input type="checkbox" id="showCounties" /> Counties</label>
+      </div>
+      <div class="legend" id="mapLegend">
+        <div class="legend-title">Census tract stratum (region fill)</div>
+        <div class="legend-row"><span class="legend-swatch" style="background:rgba(34,197,94,0.5);border-color:#22c55e"></span><span style="color:var(--urban)">Urban</span> tract</div>
+        <div class="legend-row"><span class="legend-swatch" style="background:rgba(234,179,8,0.45);border-color:#eab308"></span><span style="color:var(--suburban)">Suburban</span> tract</div>
+        <div class="legend-row"><span class="legend-swatch" style="background:rgba(168,85,247,0.4);border-color:#a855f7"></span><span style="color:var(--rural)">Rural</span> tract</div>
+        <div style="margin-top:6px;font-size:10px">Window disks (optional): 10 / 30 / 80 km circles</div>
+        <div style="margin-top:6px"><span class="dot" style="background:#6b7280"></span> Charging station</div>
+        <div id="perfLegendBlock" style="display:none;margin-top:8px">
+          <div class="legend-title">Top-15 predicted performance</div>
+          <div class="perf-gradient"></div>
+          <div>Low ← → High (green = more resilient)</div>
+        </div>
+        <div id="boundaryHint" style="display:none;color:#fbbf24;margin-top:6px;font-size:10px"></div>
+        <div id="zoomHint" style="display:none;color:#fbbf24;margin-top:6px">Zoom ≥5 for tract area fill</div>
+      </div>
+    </div>
+
+    <aside class="aside-top">
+      <div class="card" style="padding:8px">
+        <h3>Top resilient (test)</h3>
+        <button class="side secondary" id="topBtn" style="margin-top:0;padding:6px;font-size:11px">Load top 15</button>
+        <div id="topList" style="margin-top:8px"></div>
+      </div>
+    </aside>
+
+    <aside class="aside-main">
+      <div class="card"><h3>Status</h3><p id="statusLine" class="status">Connecting…</p></div>
+      <div class="card">
+        <h3>Model</h3>
+        <p id="modelSource" class="status" style="margin:0 0 6px">Loading model…</p>
+        <button class="side secondary" id="trainBtn">Retrain LightGBM (optional)</button>
+        <button class="side secondary" id="metricsBtn">Refresh metrics</button>
+        <div id="metricsOut">—</div>
+      </div>
+      <div class="card" id="regionCard">
+        <h3>Map probe</h3>
+        <p id="regionStatus" class="status" style="margin:0">① Probe click map → circle + orange nodes · ② Analyze circle → LGB curves</p>
+        <div id="probeCoords" class="probe-coords">lat — · lon —</div>
+        <label style="font-size:12px;color:var(--muted)">Circle radius (km) — auto: urban 10 · suburban 30 · rural 80
+          <input id="drawRadiusKm" type="number" value="30" min="5" max="80" style="width:100%;margin-top:4px" />
+        </label>
+        <p id="stratumBadge" class="probe-coords" style="margin-top:6px">stratum —</p>
+      </div>
+      <div class="card" id="windowCard">
+        <h3>Region analysis</h3>
+        <input type="text" id="windowIdInput" placeholder="window_id (select disk only — not used by Analyze circle)" style="margin-bottom:6px" />
+        <button type="button" class="side" id="analyzeBtn">Analyze circle (LightGBM)</button>
+        <button type="button" class="side secondary" id="analyzeWindowBtn" style="margin-top:4px">Analyze training window</button>
+        <div id="windowSummary" style="margin-top:8px;font-size:12px;color:var(--muted)">Probe click map → orange nodes → Analyze circle.</div>
+        <h4 style="margin:12px 0 6px;font-size:0.72rem;text-transform:uppercase;letter-spacing:0.04em;color:var(--muted)">Network attack curves (model predict)</h4>
+        <div class="chart-wrap">
+          <canvas id="curveChart"></canvas>
+          <div id="chartEmpty" class="chart-empty">Click Analyze — predicted curves for this ad-hoc circle (not in training set).</div>
+          <div id="chartHover" style="display:none"></div>
+          <div class="chart-legend" id="chartLegend"></div>
+        </div>
+      </div>
+    </aside>
+  </div>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet.draw/1.0.4/leaflet.draw.js"></script>
+  <script src="https://unpkg.com/leaflet.heat@0.2.0/dist/leaflet-heat.js"></script>
+  <script>
+    const REMOVAL_PCT = [5, 10, 20, 30, 40, 50, 60, 70, 80, 90];
+    const STRATUM_COLOR = { urban: "#22c55e", suburban: "#eab308", rural: "#a855f7" };
+    const STRATUM_RADIUS_KM = { urban: 10, suburban: 30, rural: 80 };
+    const ATK_COLOR = { betweenness: "#3b82f6", random: "#f97316", capacity: "#a855f7" };
+
+    const byId = (id) => document.getElementById(id);
+    function apiUrl(path) {
+      const root = window.location.pathname.replace(/\/$/, "");
+      return root + (path.startsWith("/") ? path : "/" + path);
+    }
+    async function asJson(resp) {
+      const txt = await resp.text();
+      if (!resp.ok) {
+        try {
+          const j = JSON.parse(txt);
+          return { status: resp.status, detail: j.detail, error: formatApiError(j) };
+        } catch {
+          return { status: resp.status, error: txt.slice(0, 400) };
+        }
+      }
+      try { return JSON.parse(txt); } catch { return { error: "Not JSON" }; }
+    }
+
+    function formatApiError(data) {
+      if (!data) return "Unknown API error";
+      if (typeof data.detail === "string") return data.detail;
+      if (Array.isArray(data.detail)) {
+        return data.detail.map((d) => d.msg || d.message || JSON.stringify(d)).join("; ");
+      }
+      return data.error || JSON.stringify(data).slice(0, 400);
+    }
+
+    async function fetchJson(url, options = {}, timeoutMs = 20000) {
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+      try {
+        const resp = await fetch(url, { ...options, signal: ctrl.signal });
+        return await asJson(resp);
+      } catch (e) {
+        if (e.name === "AbortError") return { error: `Request timeout (${timeoutMs / 1000}s)` };
+        return { error: String(e.message || e) };
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+
+    function lossToPerformance(curvesLoss) {
+      const out = {};
+      for (const [atk, vals] of Object.entries(curvesLoss || {})) {
+        out[atk] = vals.map((v) => Math.max(0, Math.min(1, 1 - v)));
+      }
+      return out;
+    }
+
+    function curvesForChart(data) {
+      if (data.pred_curves_performance) return data.pred_curves_performance;
+      return lossToPerformance(data.pred_curves);
+    }
+
+    let map, stationLayer, boundaryLayer, windowLayer, highlightLayer, topLayer, countyLayer, heatLayer, drawnLayer, probeLayer;
+    let drawControl = null;
+    let windowCircles = {};
+    let selectedWindowId = null;
+    let reloadTimer = null;
+    let top15Items = [];
+    let top15Rank = {};
+    let chartPoints = [];
+    let mapMode = "probe";
+    let probeCircle = null;
+    let probeMarker = null;
+    let lastProbe = null;
+
+    const STATION_STYLE = { color: "#4b5563", fillColor: "#6b7280", fillOpacity: 0.85, weight: 0.5 };
+
+    function stratumColor(s) { return STRATUM_COLOR[s] || "#64748b"; }
+
+    function stratumRadiusKm(stratum) {
+      const st = String(stratum || "suburban").toLowerCase();
+      return STRATUM_RADIUS_KM[st] ?? 30;
+    }
+
+    function haversineKm(lat1, lon1, lat2, lon2) {
+      const R = 6371, toR = Math.PI / 180;
+      const dLat = (lat2 - lat1) * toR, dLon = (lon2 - lon1) * toR;
+      const a = Math.sin(dLat / 2) ** 2 + Math.cos(lat1 * toR) * Math.cos(lat2 * toR) * Math.sin(dLon / 2) ** 2;
+      return 2 * R * Math.asin(Math.sqrt(a));
+    }
+
+    function dedupeWindows(windows) {
+      if (!byId("winDedupe").checked) return windows;
+      const sorted = [...windows].sort((a, b) => (b.n_nodes || 0) - (a.n_nodes || 0));
+      const kept = [];
+      for (const w of sorted) {
+        let ok = true;
+        for (const k of kept) {
+          const d = haversineKm(w.center_lat, w.center_lon, k.center_lat, k.center_lon);
+          const sep = 0.45 * Math.min(w.radius_km, k.radius_km);
+          if (d < sep) { ok = false; break; }
+        }
+        if (ok) kept.push(w);
+      }
+      return kept;
+    }
+
+    function perfRankColor(rank, n) {
+      const t = n <= 1 ? 1 : rank / (n - 1);
+      const r = Math.round(239 - t * (239 - 34));
+      const g = Math.round(68 + t * (197 - 68));
+      const b = Math.round(68 - t * 68);
+      return `rgb(${r},${g},${b})`;
+    }
+
+    function windowStyle(w, isSel) {
+      const display = byId("winDisplay").value;
+      const topMode = top15Items.length > 0 && top15Rank[w.window_id] != null;
+      const st = w.window_stratum;
+      let stroke = stratumColor(st);
+      let fill = stroke;
+      let fillOp = 0.04;
+      let weight = 1.2;
+      if (topMode) {
+        const rnk = top15Rank[w.window_id];
+        stroke = perfRankColor(rnk, top15Items.length);
+        fill = stroke;
+        fillOp = 0.22;
+        weight = rnk < 3 ? 3 : 2;
+      }
+      if (isSel) {
+        stroke = "#f97316";
+        fillOp = Math.max(fillOp, 0.35);
+        weight = 4;
+      }
+      if (display === "outline") {
+        fillOp = isSel ? 0.12 : 0;
+        weight = isSel ? 3 : weight;
+      } else if (display === "light") {
+        fillOp = isSel ? 0.25 : 0.06;
+      }
+      return { color: stroke, fillColor: fill, fillOpacity: fillOp, weight };
+    }
+
+    function addWindowCircle(w, layer, isSel) {
+      const st = windowStyle(w, isSel);
+      const circle = L.circle([w.center_lat, w.center_lon], {
+        radius: w.radius_m,
+        color: st.color,
+        weight: st.weight,
+        fillColor: st.fillColor,
+        fillOpacity: st.fillOpacity,
+        interactive: true
+      });
+      circle._winMeta = w;
+      const perf = w.pred_mean != null ? (1 - w.pred_mean).toFixed(4) : "—";
+      circle.bindPopup(
+        `<b>${w.window_id}</b><br/>${w.window_stratum} · ${w.radius_km} km · n=${w.n_nodes}` +
+        `<br/>pred performance (mean): ${perf}`
+      );
+      circle.on("click", (e) => { L.DomEvent.stopPropagation(e); selectWindow(w.window_id); });
+      windowCircles[w.window_id] = circle;
+      circle.addTo(layer);
+    }
+
+    function styleTractFeature(feature) {
+      const p = feature.properties || {};
+      const col = p.color || stratumColor(p.stratum);
+      return {
+        color: col,
+        weight: 0.35,
+        fillColor: col,
+        fillOpacity: p.fillOpacity ?? 0.52,
+        interactive: true
+      };
+    }
+
+    async function loadStratumBoundaries() {
+      boundaryLayer.clearLayers();
+      byId("boundaryHint").style.display = "none";
+      if (!byId("showStratumBoundaries").checked) return;
+      const zoom = map.getZoom();
+      if (zoom < 5) {
+        byId("zoomHint").style.display = "block";
+        return;
+      }
+      byId("boundaryHint").textContent = "Loading tract polygons…";
+      byId("boundaryHint").style.display = "block";
+      const qs = new URLSearchParams({
+        bbox: mapBbox(),
+        max_features: String(zoom < 7 ? 3500 : 2000),
+        simplify: String(zoom < 7 ? 0.02 : 0.01)
+      });
+      const gj = await asJson(await fetch(apiUrl("/api/map/tract-strata?" + qs)));
+      if (gj.features?.length) {
+        byId("boundaryHint").style.display = "none";
+        L.geoJSON(gj, {
+          style: styleTractFeature,
+          onEachFeature: (f, layer) => {
+            const p = f.properties || {};
+            layer.bindPopup(`<b>${p.stratum}</b> tract<br/>${p.tract_geoid || ""}`);
+          }
+        }).addTo(boundaryLayer);
+        boundaryLayer.bringToBack();
+        return;
+      }
+      byId("boundaryHint").textContent = gj.error || "No tract polygons — run download_tract_shapes.py on server";
+      byId("boundaryHint").style.display = "block";
+    }
+
+    function expandedBbox(lat, lon, radiusKm) {
+      const d = radiusKm / 111.0;
+      return [lat - d, lon - d, lat + d, lon + d].join(",");
+    }
+
+    function classifyFromPoints(lat, lon, points) {
+      if (!points?.length) {
+        return { window_stratum: "suburban", radius_km: 30, method: "default" };
+      }
+      let n10 = 0, n30 = 0;
+      for (const p of points) {
+        const d = haversineKm(lat, lon, p.lat, p.lon);
+        if (d <= 10) n10++;
+        if (d <= 30) n30++;
+      }
+      let stratum = "rural";
+      if (n10 >= 15) stratum = "urban";
+      else if (n30 >= 15) stratum = "suburban";
+      return {
+        window_stratum: stratum,
+        radius_km: stratumRadiusKm(stratum),
+        method: "density_heuristic",
+        stations_within_10km: n10,
+        stations_within_30km: n30,
+      };
+    }
+
+    async function classifyLocal(lat, lon) {
+      const qs = new URLSearchParams({ bbox: expandedBbox(lat, lon, 80), limit: "25000" });
+      const st = await fetchJson(apiUrl("/api/map/stations?" + qs), {}, 12000);
+      return classifyFromPoints(lat, lon, st.points || []);
+    }
+
+    async function classifyAt(lat, lon) {
+      const local = classifyFromPoints(lat, lon, window._visibleStations || []);
+      const probe = await fetchJson(
+        apiUrl(`/api/map/probe?lat=${lat}&lon=${lon}`),
+        {},
+        4000
+      );
+      if (probe.window_stratum && !probe.error && !probe.detail) return probe;
+      return classifyLocal(lat, lon).catch(() => local);
+    }
+
+    function predictCircleNeedsFallback(data) {
+      if (!data) return false;
+      const s = JSON.stringify(data.detail || data.error || "");
+      return /"query","req"|Field required|missing/i.test(s);
+    }
+
+    async function predictCircle(lat, lon, radiusKm) {
+      const payload = { lat, lon, radius_km: radiusKm, fast: true };
+      let data = await fetchJson(apiUrl("/api/predict/circle"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      }, 120000);
+      if (!predictCircleNeedsFallback(data)) return data;
+      const qs = new URLSearchParams({
+        lat: String(lat),
+        lon: String(lon),
+        radius_km: String(radiusKm),
+        fast: "true",
+      });
+      return fetchJson(apiUrl("/api/predict/circle?" + qs), {}, 120000);
+    }
+
+    function probeRadiusKm() {
+      const v = parseFloat(byId("drawRadiusKm").value);
+      return Number.isFinite(v) && v >= 5 ? v : 30;
+    }
+
+    async function fetchStationsInCircleClient(lat, lon, radiusKm) {
+      const qs = new URLSearchParams({ bbox: expandedBbox(lat, lon, radiusKm), limit: "50000" });
+      const st = await fetchJson(apiUrl("/api/map/stations?" + qs), {}, 15000);
+      const pts = st.points || [];
+      const inside = [];
+      for (const p of pts) {
+        if (haversineKm(lat, lon, p.lat, p.lon) <= radiusKm + 1e-6) {
+          inside.push({
+            node_id: p.node_id,
+            lat: p.lat,
+            lon: p.lon,
+            state: p.state,
+            capacity: p.capacity,
+            stratum: p.node_stratum || p.stratum || "",
+          });
+        }
+      }
+      return inside;
+    }
+
+    /** Step 2: which nodes fall inside the circle (client-side, always works). */
+    async function highlightStationsInCircle(lat, lon, radiusKm) {
+      let stations = await fetchStationsInCircleClient(lat, lon, radiusKm);
+      if (stations.length < 5) {
+        const data = await asJson(await fetch(
+          apiUrl(`/api/map/stations-in-circle?lat=${lat}&lon=${lon}&radius_km=${radiusKm}`)
+        ));
+        if (data.stations?.length) stations = data.stations;
+      }
+      window._selectedStations = stations;
+      drawSelectedStations();
+      redrawStationLayer();
+      return stations.length;
+    }
+
+    function setStratumBadge(st, rKm, probe) {
+      const el = byId("stratumBadge");
+      if (!el) return;
+      const method = probe?.method || "";
+      const src = probe?.source || probe?.note || "";
+      const geoid = probe?.tract_geoid ? ` · tract ${probe.tract_geoid}` : "";
+      el.innerHTML =
+        `<span style="color:${stratumColor(st)}">${st}</span> · <b>${rKm} km</b>${geoid}` +
+        (method ? `<br/><span style="font-size:10px">via ${method}${src ? " · " + src : ""}</span>` : "");
+    }
+
+    /** Step 1–2: coords + circle + highlight (no model predict). */
+    async function applyProbe(lat, lon, stratum, radiusKm, probeMeta = {}) {
+      const st = String(stratum || "suburban").toLowerCase();
+      const rKm = Number(radiusKm) > 0 ? Number(radiusKm) : stratumRadiusKm(st);
+      lastProbe = { lat, lon, stratum: st, radiusKm: rKm, ...probeMeta };
+      const rInput = byId("drawRadiusKm");
+      if (rInput) rInput.value = String(rKm);
+      setStratumBadge(st, rKm, lastProbe);
+      drawProbeOnMap(lat, lon, rKm, st);
+      bringProbeToFront();
+      byId("regionStatus").textContent = "Highlighting stations in circle…";
+      const n = await highlightStationsInCircle(lat, lon, rKm);
+      byId("regionStatus").className = n > 0 ? "status ok" : "status err";
+      byId("regionStatus").textContent =
+        n > 0
+          ? `Step 1–2 done: ${st} · ${rKm} km · <b>${n}</b> nodes (orange). Click <b>Analyze circle</b> for LGB curves.`
+          : `No stations in ${rKm} km — increase radius or click elsewhere.`;
+      return n;
+    }
+
+    function bringLayerGroupToTop(layer) {
+      if (!map || !layer || !map.hasLayer(layer)) return;
+      layer.remove();
+      layer.addTo(map);
+    }
+
+    function bringProbeToFront() {
+      if (probeLayer) {
+        probeLayer.eachLayer((ly) => { if (typeof ly.bringToFront === "function") ly.bringToFront(); });
+        bringLayerGroupToTop(probeLayer);
+      }
+      if (highlightLayer) {
+        highlightLayer.eachLayer((ly) => { if (typeof ly.bringToFront === "function") ly.bringToFront(); });
+        bringLayerGroupToTop(highlightLayer);
+      }
+    }
+
+    async function runCircleAnalyze(lat, lon, radiusKm, stratum, titlePrefix) {
+      byId("regionStatus").className = "status";
+      byId("regionStatus").textContent = "Step 3–4: LightGBM predict + drawing curves…";
+      byId("chartEmpty").style.display = "block";
+      byId("chartEmpty").textContent = "Predicting…";
+      const data = await predictCircle(lat, lon, radiusKm);
+      const st = stratum || data.window_stratum || "suburban";
+      data.window_stratum = data.window_stratum || st;
+      data.radius_km = data.radius_km ?? radiusKm;
+      drawProbeOnMap(lat, lon, radiusKm, st);
+      if (data.stations?.length) {
+        window._selectedStations = data.stations;
+        drawSelectedStations();
+      }
+      const n = data.n_stations ?? (data.stations ? data.stations.length : window._selectedStations?.length || "?");
+      showAnalysisResult(data, `${titlePrefix || "Circle"} · R=${radiusKm} km · ${n} nodes`);
+      return data;
+    }
+
+    function initMap() {
+      map = L.map("map", { preferCanvas: true }).setView([39.5, -98.35], 4);
+      L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png", {
+        maxZoom: 18, attribution: "&copy; CARTO"
+      }).addTo(map);
+      boundaryLayer = L.layerGroup().addTo(map);
+      stationLayer = L.layerGroup().addTo(map);
+      windowLayer = L.layerGroup().addTo(map);
+      highlightLayer = L.layerGroup().addTo(map);
+      topLayer = L.layerGroup().addTo(map);
+      countyLayer = L.layerGroup().addTo(map);
+      probeLayer = L.layerGroup().addTo(map);
+      drawnLayer = new L.FeatureGroup().addTo(map);
+      map.on(L.Draw.Event.CREATED, onDrawCreated);
+      setMapMode("probe");
+      map.on("click", onMapClick);
+      map.on("moveend zoomend", () => {
+        clearTimeout(reloadTimer);
+        reloadTimer = setTimeout(loadMapLayers, 350);
+      });
+      const canvas = byId("curveChart");
+      if (canvas) {
+        canvas.addEventListener("mousemove", onChartHover);
+        canvas.addEventListener("mouseleave", () => {
+          if (chartPoints.length) byId("chartHover").textContent = "";
+        });
+      }
+      const radiusInput = byId("drawRadiusKm");
+      if (radiusInput) {
+        radiusInput.addEventListener("change", async () => {
+          if (!lastProbe) return;
+          await applyProbe(lastProbe.lat, lastProbe.lon, lastProbe.stratum, probeRadiusKm());
+        });
+      }
+    }
+
+    function probeRadiusFromLast() {
+      if (!lastProbe) return probeRadiusKm();
+      return Number(lastProbe.radiusKm ?? lastProbe.radius_km) || probeRadiusKm();
+    }
+
+  async function runAnalyzeCircle() {
+      if (!lastProbe) {
+        byId("regionStatus").className = "status err";
+        byId("regionStatus").textContent = "Probe click the map first (Probe mode), then Analyze circle.";
+        return;
+      }
+      const rKm = probeRadiusFromLast();
+      byId("regionStatus").textContent = `Analyzing circle: ${lastProbe.stratum} · ${rKm} km …`;
+      await applyProbe(lastProbe.lat, lastProbe.lon, lastProbe.stratum, rKm, lastProbe);
+      const n = window._selectedStations?.length || 0;
+      if (n < 15) {
+        byId("regionStatus").className = "status err";
+        byId("regionStatus").textContent =
+          `Only ${n} nodes in circle (need ≥15). Try urban/suburban radius or another location.`;
+        return;
+      }
+      await runCircleAnalyze(
+        lastProbe.lat, lastProbe.lon, rKm, lastProbe.stratum,
+        `Probe · ${lastProbe.stratum} · ${rKm} km · ${n} nodes`
+      );
+    }
+
+    function bindAnalyzeButton() {
+      const btn = byId("analyzeBtn");
+      if (!btn) return;
+      btn.disabled = false;
+      btn.type = "button";
+      btn.onclick = async () => {
+        const label0 = btn.textContent;
+        btn.disabled = true;
+        btn.textContent = "Analyzing…";
+        try {
+          await runAnalyzeCircle();
+        } catch (err) {
+          byId("regionStatus").className = "status err";
+          byId("regionStatus").textContent = "Analyze error: " + String(err.message || err);
+          byId("windowSummary").innerHTML = `<span class="status err">${String(err.message || err)}</span>`;
+        } finally {
+          btn.disabled = false;
+          btn.textContent = label0;
+        }
+      };
+
+      const winBtn = byId("analyzeWindowBtn");
+      if (winBtn) {
+        winBtn.type = "button";
+        winBtn.onclick = async () => {
+          const wid = byId("windowIdInput").value.trim();
+          if (!wid) {
+            byId("regionStatus").textContent = "Enter window_id or click a window disk (Select window mode).";
+            return;
+          }
+          winBtn.disabled = true;
+          try {
+            const data = await fetchJson(apiUrl("/api/predict"), {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ window_id: wid }),
+            }, 60000);
+            showAnalysisResult(data, `Window ${wid} (training set)`);
+          } finally {
+            winBtn.disabled = false;
+          }
+        };
+      }
+    }
+
+    function redrawStationLayer() {
+      if (!map || !byId("showStations").checked) return;
+      const zoom = map.getZoom();
+      const selIds = new Set((window._selectedStations || []).map((s) => s.node_id));
+      stationLayer.clearLayers();
+      const pts = window._visibleStations || [];
+      for (const p of pts) {
+        const inSel = selIds.has(p.node_id);
+        L.circleMarker([p.lat, p.lon], {
+          radius: zoom < 6 ? 1.5 : 2.2,
+          color: inSel ? "#9a3412" : STATION_STYLE.color,
+          fillColor: inSel ? "#9a3412" : STATION_STYLE.fillColor,
+          fillOpacity: inSel ? 0.2 : STATION_STYLE.fillOpacity,
+          weight: inSel ? 0 : STATION_STYLE.weight,
+          interactive: false
+        }).addTo(stationLayer);
+      }
+      drawSelectedStations();
+      bringProbeToFront();
+    }
+
+    function mapBbox() {
+      const b = map.getBounds();
+      return [b.getSouth(), b.getWest(), b.getNorth(), b.getEast()].join(",");
+    }
+
+    async function loadMapLayers() {
+      if (!map) return;
+      const display = byId("winDisplay").value;
+      const zoom = map.getZoom();
+      const needZoomWin = byId("showWindows").checked && display === "zoom" && zoom < 7;
+      byId("zoomHint").style.display = (needZoomWin || (byId("showStratumBoundaries").checked && zoom < 5)) ? "block" : "none";
+
+      stationLayer.clearLayers();
+      boundaryLayer.clearLayers();
+      windowLayer.clearLayers();
+      windowCircles = {};
+      topLayer.clearLayers();
+
+      await loadStratumBoundaries();
+
+      if (byId("showStations").checked) {
+        const qs = new URLSearchParams({ bbox: mapBbox(), limit: "20000" });
+        const st = await asJson(await fetch(apiUrl("/api/map/stations?" + qs)));
+        if (st.points) {
+          window._visibleStations = st.points;
+          const selIds = new Set((window._selectedStations || []).map((s) => s.node_id));
+          for (const p of st.points) {
+            const inSel = selIds.has(p.node_id);
+            L.circleMarker([p.lat, p.lon], {
+              radius: inSel ? 0 : (zoom < 6 ? 1.5 : 2.2),
+              ...STATION_STYLE,
+              fillOpacity: inSel ? 0 : STATION_STYLE.fillOpacity,
+              interactive: false
+            }).addTo(stationLayer);
+          }
+        }
+      }
+
+      if (byId("showWindows").checked && !(display === "zoom" && zoom < 7)) {
+        const qs = new URLSearchParams({ bbox: mapBbox(), limit: String(byId("winLimit").value || 800) });
+        const stratum = byId("filterStratum").value;
+        if (stratum) qs.set("window_stratum", stratum);
+        const wn = await asJson(await fetch(apiUrl("/api/map/windows?" + qs)));
+        if (wn.windows) {
+          const list = dedupeWindows(wn.windows);
+          for (const w of list) {
+            addWindowCircle(w, windowLayer, w.window_id === selectedWindowId);
+          }
+        }
+      }
+      applyTop15Rings();
+      if (selectedWindowId) restyleAllWindows();
+      if (lastProbe) {
+        drawProbeOnMap(lastProbe.lat, lastProbe.lon, lastProbe.radiusKm, lastProbe.stratum);
+        drawSelectedStations();
+        bringProbeToFront();
+      }
+    }
+
+    function restyleAllWindows() {
+      for (const [id, c] of Object.entries(windowCircles)) {
+        const w = c._winMeta;
+        const st = windowStyle(w, id === selectedWindowId);
+        c.setStyle(st);
+      }
+      byId("windowCard").classList.toggle("selected-box", !!selectedWindowId);
+    }
+
+    function applyTop15Rings() {
+      topLayer.clearLayers();
+      if (!top15Items.length) return;
+      for (let i = 0; i < top15Items.length; i++) {
+        const r = top15Items[i];
+        if (r.center_lat == null) continue;
+        const col = perfRankColor(i, top15Items.length);
+        L.circleMarker([r.center_lat, r.center_lon], {
+          radius: 6 + (top15Items.length - i) * 0.3,
+          color: col, fillColor: col, fillOpacity: 0.85, weight: 2
+        }).bindPopup(`<b>#${i + 1}</b> ${r.window_id}<br/>performance: ${(1 - (r.pred_mean ?? 0)).toFixed(4)}`).addTo(topLayer);
+      }
+    }
+
+    function probeCircleStyle(stratum) {
+      const st = String(stratum || "suburban").toLowerCase();
+      const col = stratumColor(st);
+      const rKm = stratumRadiusKm(st);
+      const styles = {
+        urban: { weight: 4, dashArray: null, fillOpacity: 0.22, markerR: 9 },
+        suburban: { weight: 3, dashArray: "10 6", fillOpacity: 0.16, markerR: 8 },
+        rural: { weight: 3, dashArray: "4 8", fillOpacity: 0.12, markerR: 8 },
+      };
+      return { col, rKm, st, ...(styles[st] || styles.suburban) };
+    }
+
+    function drawProbeOnMap(lat, lon, radiusKm, stratum) {
+      if (!probeLayer) return;
+      probeLayer.clearLayers();
+      const ps = probeCircleStyle(stratum);
+      const rKm = Number(radiusKm) > 0 ? Number(radiusKm) : ps.rKm;
+      const col = ps.col;
+      probeMarker = L.circleMarker([lat, lon], {
+        radius: ps.markerR,
+        color: "#ffffff",
+        fillColor: col,
+        fillOpacity: 1,
+        weight: 3,
+      }).bindPopup(
+        `<b>${ps.st.toUpperCase()}</b> probe<br/>radius <b>${rKm} km</b><br/>` +
+        `<span style="color:${col}">●</span> green=urban 10 · yellow=suburban 30 · purple=rural 80`
+      ).addTo(probeLayer);
+      probeCircle = L.circle([lat, lon], {
+        radius: rKm * 1000,
+        color: col,
+        weight: ps.weight,
+        dashArray: ps.dashArray,
+        fillColor: col,
+        fillOpacity: ps.fillOpacity,
+      }).addTo(probeLayer);
+      bringProbeToFront();
+    }
+
+    /** Step 1: click → lat/lon + circle + highlight. Predict only on Analyze. */
+    async function onMapClick(e) {
+      if (mapMode !== "probe") return;
+      L.DomEvent.stopPropagation(e);
+      const lat = e.latlng.lat, lon = e.latlng.lng;
+
+      selectedWindowId = null;
+      byId("windowIdInput").value = "";
+      restyleAllWindows();
+
+      byId("probeCoords").textContent = `lat ${lat.toFixed(5)} · lon ${lon.toFixed(5)}`;
+      byId("regionStatus").textContent = "Step 1–2: classifying & highlighting…";
+
+      let probe = classifyFromPoints(lat, lon, window._visibleStations || []);
+      try {
+        probe = await Promise.race([
+          classifyAt(lat, lon),
+          new Promise((resolve) => setTimeout(() => resolve(probe), 5000)),
+        ]);
+      } catch (_) { /* keep local probe */ }
+
+      const st = (probe.window_stratum || "suburban").toLowerCase();
+      const rKm = probe.radius_km != null ? Number(probe.radius_km) : stratumRadiusKm(st);
+      await applyProbe(lat, lon, st, rKm, probe);
+    }
+
+    function showAnalysisResult(data, title) {
+      byId("windowCard").classList.add("selected-box");
+      const errMsg = data.error || data.detail ? formatApiError(data) : null;
+      if (errMsg) {
+        byId("regionStatus").className = "status err";
+        byId("regionStatus").textContent = `Analyze failed: ${errMsg}`;
+        byId("windowSummary").innerHTML = `<span class="status err">${errMsg}</span>`;
+        byId("chartEmpty").style.display = "block";
+        byId("chartEmpty").textContent = errMsg;
+        byId("chartHover").style.display = "none";
+        drawCurves(null);
+        return;
+      }
+      const curves = curvesForChart(data);
+      if (!curves || !Object.keys(curves).length) {
+        byId("regionStatus").className = "status err";
+        byId("regionStatus").textContent = "No pred_curves in response — re-upload app/main.py (PredictCircleRequest) + artifacts.";
+        byId("chartEmpty").textContent = "Missing pred_curves — check server logs.";
+        return;
+      }
+      const perf = data.pred_mean_performance ?? (1 - (data.pred_mean ?? 0));
+      const n = data.n_stations ?? (data.stations ? data.stations.length : "?");
+      byId("regionStatus").className = "status ok";
+      byId("regionStatus").textContent = title;
+      byId("windowSummary").innerHTML =
+        `<strong>${title}</strong><br/>${n} stations · mean relative performance <b>${perf.toFixed(4)}</b>` +
+        (data.window_stratum ? `<br/>Stratum: ${data.window_stratum} · R=${data.radius_km} km` : "") +
+        `<br/><span style="color:var(--muted)">Ad-hoc region — LGB predict on induced subgraph features.</span>`;
+      if (data.stations?.length) {
+        window._selectedStations = data.stations;
+        drawSelectedStations();
+      }
+      requestAnimationFrame(() => {
+        drawCurves(curves);
+        byId("chartHover").style.display = "block";
+        byId("chartEmpty").style.display = "none";
+        byId("curveChart")?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+      });
+    }
+
+    async function selectWindow(wid) {
+      selectedWindowId = wid;
+      byId("windowIdInput").value = wid;
+      restyleAllWindows();
+      const det = await asJson(await fetch(apiUrl("/api/map/window/" + encodeURIComponent(wid))));
+      if (det.error) {
+        byId("windowSummary").textContent = det.error;
+        return;
+      }
+      lastProbe = {
+        lat: det.center_lat, lon: det.center_lon,
+        stratum: det.window_stratum, radiusKm: det.radius_km
+      };
+      byId("probeCoords").textContent = `lat ${det.center_lat.toFixed(5)} · lon ${det.center_lon.toFixed(5)}`;
+      byId("drawRadiusKm").value = String(det.radius_km);
+      window._selectedStations = det.stations || [];
+      drawSelectedStations();
+      await applyProbe(det.center_lat, det.center_lon, det.window_stratum, det.radius_km, det);
+      byId("regionStatus").className = "status ok";
+      byId("regionStatus").textContent =
+        `Window ${wid} selected · ${det.n_nodes} nodes. Click Analyze circle for ad-hoc LGB, or Analyze training window.`;
+    }
+
+    function drawSelectedStations() {
+      highlightLayer.clearLayers();
+      const sts = window._selectedStations;
+      if (!sts || !sts.length) return;
+      const zoom = map ? map.getZoom() : 6;
+      const r = zoom < 7 ? 6 : 7;
+      for (const s of sts) {
+        L.circleMarker([s.lat, s.lon], {
+          radius: r,
+          color: "#ffffff",
+          fillColor: "#f97316",
+          fillOpacity: 1,
+          weight: 2,
+        }).addTo(highlightLayer);
+      }
+      bringProbeToFront();
+    }
+
+    function drawCurves(curves) {
+      const canvas = byId("curveChart");
+      const ctx = canvas.getContext("2d");
+      const dpr = window.devicePixelRatio || 1;
+      const w = canvas.clientWidth, h = canvas.clientHeight;
+      canvas.width = w * dpr;
+      canvas.height = h * dpr;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.clearRect(0, 0, w, h);
+      chartPoints = [];
+      if (!curves || !Object.keys(curves).length) {
+        byId("chartEmpty").style.display = "block";
+        byId("chartHover").style.display = "none";
+        return;
+      }
+      byId("chartEmpty").style.display = "none";
+      byId("chartHover").style.display = "block";
+
+      const padL = 48, padR = 12, padT = 22, padB = 36;
+      let ymax = 0, ymin = 1;
+      for (const vals of Object.values(curves)) {
+        for (const v of vals) { ymax = Math.max(ymax, v); ymin = Math.min(ymin, v); }
+      }
+      const yPad = (ymax - ymin) * 0.08 || 0.05;
+      ymax = Math.min(1, ymax + yPad);
+      ymin = Math.max(0, ymin - yPad);
+      if (ymax - ymin < 0.05) { ymin = 0; ymax = 1; }
+
+      const xMap = (i) => padL + (i / (REMOVAL_PCT.length - 1)) * (w - padL - padR);
+      const yMap = (v) => padT + (1 - (v - ymin) / (ymax - ymin)) * (h - padT - padB);
+
+      ctx.strokeStyle = "#475569";
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(padL, padT);
+      ctx.lineTo(padL, h - padB);
+      ctx.lineTo(w - padR, h - padB);
+      ctx.stroke();
+
+      ctx.fillStyle = "#94a3b8";
+      ctx.font = "10px sans-serif";
+      ctx.textAlign = "center";
+      REMOVAL_PCT.forEach((pct, i) => {
+        if (i % 2 !== 0 && i !== REMOVAL_PCT.length - 1) return;
+        const x = xMap(i);
+        ctx.fillText(pct + "%", x, h - padB + 14);
+      });
+      ctx.textAlign = "right";
+      [ymin, (ymin + ymax) / 2, ymax].forEach((v) => {
+        ctx.fillText(v.toFixed(2), padL - 6, yMap(v) + 3);
+      });
+      ctx.textAlign = "center";
+      ctx.fillText("Removal percentage (%)", (padL + w - padR) / 2, h - 2);
+      ctx.save();
+      ctx.translate(14, (padT + h - padB) / 2);
+      ctx.rotate(-Math.PI / 2);
+      ctx.fillText("Relative performance", 0, 0);
+      ctx.restore();
+      ctx.fillStyle = "#cbd5e1";
+      ctx.font = "11px sans-serif";
+      ctx.textAlign = "left";
+      ctx.fillText("LGB predict · 1 − loss (unseen region)", padL, 14);
+
+      let legHtml = "";
+      for (const [atk, vals] of Object.entries(curves)) {
+        const col = ATK_COLOR[atk] || "#94a3b8";
+        legHtml += `<span><span style="display:inline-block;width:10px;height:3px;background:${col};margin-right:4px"></span>${atk}</span>`;
+        ctx.strokeStyle = col;
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        vals.forEach((v, i) => {
+          const x = xMap(i), y = yMap(v);
+          if (i === 0) ctx.moveTo(x, y);
+          else ctx.lineTo(x, y);
+          chartPoints.push({ x, y, atk, pct: REMOVAL_PCT[i], perf: v });
+        });
+        ctx.stroke();
+        vals.forEach((v, i) => {
+          const x = xMap(i), y = yMap(v);
+          ctx.fillStyle = col;
+          ctx.beginPath();
+          ctx.arc(x, y, 3.5, 0, Math.PI * 2);
+          ctx.fill();
+        });
+      }
+      byId("chartLegend").innerHTML = legHtml;
+    }
+
+    function onChartHover(ev) {
+      if (!chartPoints.length) return;
+      const rect = byId("curveChart").getBoundingClientRect();
+      const mx = ev.clientX - rect.left, my = ev.clientY - rect.top;
+      let best = null, bestD = 20;
+      for (const p of chartPoints) {
+        const d = Math.hypot(p.x - mx, p.y - my);
+        if (d < bestD) { bestD = d; best = p; }
+      }
+      if (best) {
+        byId("chartHover").textContent =
+          `${best.atk} @ ${best.pct}% removal → relative performance ${best.perf.toFixed(4)}`;
+      }
+    }
+
+    function heatColorPerf(perf, vmin, vmax) {
+      const t = vmax > vmin ? (perf - vmin) / (vmax - vmin) : 0.5;
+      const r = Math.round(239 - t * (239 - 34));
+      const g = Math.round(68 + t * (197 - 68));
+      return `rgb(${r},${g},70)`;
+    }
+
+    async function onDrawCreated(e) {
+      drawnLayer.clearLayers();
+      drawnLayer.addLayer(e.layer);
+      let data;
+      if (e.layerType === "circle") {
+        const c = e.layer.getLatLng();
+        const rKm = e.layer.getRadius() / 1000;
+        byId("drawRadiusKm").value = String(rKm.toFixed(1));
+        byId("probeCoords").textContent = `lat ${c.lat.toFixed(5)} · lon ${c.lng.toFixed(5)}`;
+        const probe = await classifyAt(c.lat, c.lng);
+        const st = probe.window_stratum || "suburban";
+        await applyProbe(c.lat, c.lng, st, probe.radius_km ?? stratumRadiusKm(st));
+      } else if (e.layerType === "polygon") {
+        byId("regionStatus").textContent = "Predicting…";
+        const latlngs = e.layer.getLatLngs()[0];
+        const ring = latlngs.map((p) => [p.lat, p.lng]);
+        data = await asJson(await fetch(apiUrl("/api/predict/polygon"), {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ring, fast: true })
+        }));
+        showAnalysisResult(data, "Service territory (polygon)");
+      }
+    }
+
+    function setMapMode(mode) {
+      mapMode = mode;
+      if (drawControl) { map.removeControl(drawControl); drawControl = null; }
+      document.querySelectorAll(".mode-btn").forEach((b) => b.classList.remove("mode-active"));
+      const ids = { probe: "modeProbeBtn", click: "modeClickBtn", circle: "modeCircleBtn", polygon: "modePolyBtn" };
+      const btn = byId(ids[mode]);
+      if (btn) btn.classList.add("mode-active");
+      map.getContainer().style.cursor = mode === "probe" ? "crosshair" : "";
+      if (mode === "circle") {
+        drawControl = new L.Control.Draw({
+          draw: { polygon: false, rectangle: false, marker: false, polyline: false, circlemarker: false,
+            circle: { shapeOptions: { color: "#38bdf8", fillOpacity: 0.15 } } },
+          edit: { featureGroup: drawnLayer, edit: false, remove: true }
+        });
+        map.addControl(drawControl);
+      } else if (mode === "polygon") {
+        drawControl = new L.Control.Draw({
+          draw: { circle: false, rectangle: false, marker: false, polyline: false, circlemarker: false,
+            polygon: { shapeOptions: { color: "#a78bfa", fillOpacity: 0.12 } } },
+          edit: { featureGroup: drawnLayer, edit: false, remove: true }
+        });
+        map.addControl(drawControl);
+      }
+    }
+
+    async function runHeatmap() {
+      byId("regionStatus").textContent = "Building heatmap…";
+      const b = map.getBounds();
+      const body = {
+        south: b.getSouth(), west: b.getWest(), north: b.getNorth(), east: b.getEast(),
+        step_deg: 0.75, radius_km: parseFloat(byId("drawRadiusKm").value) || 30,
+        max_cells: 200, fast: true
+      };
+      const data = await asJson(await fetch(apiUrl("/api/predict/heatmap"), {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body)
+      }));
+      if (data.error || !data.points) {
+        byId("regionStatus").textContent = data.error || "Heatmap failed";
+        return;
+      }
+      if (heatLayer) map.removeLayer(heatLayer);
+      const pts = data.points.map((p) => [p.lat, p.lon, 1 - (p.pred_mean ?? 0)]);
+      heatLayer = L.heatLayer(pts, { radius: 22, blur: 18, maxZoom: 10, minOpacity: 0.35 });
+      heatLayer.addTo(map);
+      byId("regionStatus").textContent = `Heatmap: ${data.n_points} cells (green = higher performance)`;
+      byId("perfLegendBlock").style.display = "block";
+    }
+
+    async function loadCounties() {
+      const data = await asJson(await fetch(apiUrl("/api/map/counties")));
+      countyLayer.clearLayers();
+      if (!data.counties) return;
+      const perfs = data.counties.map((c) => (c.pred_mean_avg != null ? 1 - c.pred_mean_avg : null)).filter((x) => x != null);
+      const vmin = Math.min(...perfs), vmax = Math.max(...perfs);
+      for (const c of data.counties) {
+        if (c.pred_mean_avg == null) continue;
+        const perf = 1 - c.pred_mean_avg;
+        const col = heatColorPerf(perf, vmin, vmax);
+        const r = 4 + 18 * ((perf - vmin) / (vmax - vmin + 1e-9));
+        L.circleMarker([c.center_lat, c.center_lon], {
+          radius: r, color: col, fillColor: col, fillOpacity: 0.55, weight: 1
+        }).bindPopup(`County ${c.county_fips}<br/>avg performance: ${perf.toFixed(4)}<br/>${c.n_windows} windows`).addTo(countyLayer);
+      }
+    }
+
+    async function refreshHealth() {
+      const data = await asJson(await fetch(apiUrl("/api/health")));
+      const el = byId("statusLine");
+      const ms = byId("modelSource");
+      let msg = "";
+      if (data.map_ready === false) {
+        el.className = "status err";
+        msg = "Map data missing";
+      } else if (data.ok && data.ready) {
+        el.className = "status ok";
+        msg = "Model loaded · map OK";
+        ms.className = "status ok";
+        ms.textContent = "Pretrained LightGBM ready (artifacts/)";
+      } else if (data.ok) {
+        el.className = "status err";
+        msg = "Map OK · model not loaded";
+        ms.className = "status err";
+        ms.textContent = "Run bootstrap_ui_model.py once on server";
+      } else {
+        el.className = "status err";
+        msg = "API unreachable";
+        ms.textContent = "—";
+      }
+      if (data.region_ready) msg += " · predict OK";
+      else if (data.region_error) msg += ` · ${String(data.region_error).slice(0, 30)}`;
+      if (data.tract_boundaries_ready === false) {
+        msg += " · run download_tract_shapes.py for area fill";
+      }
+      el.textContent = msg;
+    }
+
+    byId("trainBtn").onclick = async () => {
+      byId("metricsOut").textContent = "Training…";
+      const data = await asJson(await fetch(apiUrl("/api/train"), {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ data_dir: "..", reuse_features: true })
+      }));
+      byId("metricsOut").textContent = data.error || `test R² ${(data.test_r2 ?? 0).toFixed(4)} · MAE ${(data.test_mae ?? 0).toFixed(4)}`;
+      await refreshHealth();
+      await loadMapLayers();
+    };
+
+    byId("metricsBtn").onclick = async () => {
+      const data = await asJson(await fetch(apiUrl("/api/metrics")));
+      if (data.error) { byId("metricsOut").textContent = data.error; return; }
+      byId("metricsOut").textContent =
+        `test R²: ${(data.test_r2 ?? 0).toFixed(4)}\ntest MAE: ${(data.test_mae ?? 0).toFixed(4)}`;
+    };
+
+    byId("topBtn").onclick = async () => {
+      const data = await asJson(await fetch(apiUrl("/api/windows/top?limit=15")));
+      const el = byId("topList");
+      if (!data.items || !data.items.length) {
+        el.innerHTML = "<span class='status'>Train model first</span>";
+        return;
+      }
+      top15Items = data.items;
+      top15Rank = {};
+      data.items.forEach((r, i) => { top15Rank[r.window_id] = i; });
+      byId("perfLegendBlock").style.display = "block";
+      el.innerHTML = data.items.map((r, i) => {
+        const col = perfRankColor(i, data.items.length);
+        const perf = 1 - (r.pred_mean ?? 0);
+        return `<div class="top-item" data-wid="${r.window_id}" style="border-left-color:${col}">` +
+          `<strong>#${i + 1}</strong> ${r.window_id}<br/>` +
+          `<span style="color:${col}">performance ${perf.toFixed(4)}</span></div>`;
+      }).join("");
+      el.querySelectorAll(".top-item").forEach((node) => {
+        node.onclick = () => {
+          const w = data.items.find((x) => x.window_id === node.getAttribute("data-wid"));
+          if (w && w.center_lat) map.flyTo([w.center_lat, w.center_lon], 9, { duration: 0.8 });
+          selectWindow(node.getAttribute("data-wid"));
+        };
+      });
+      await loadMapLayers();
+    };
+
+    byId("reloadMapBtn").onclick = loadMapLayers;
+    ["showStations", "showWindows", "showStratumBoundaries", "winDedupe", "filterStratum"].forEach((id) => {
+      byId(id).addEventListener("change", loadMapLayers);
+    });
+    byId("winDisplay").onchange = loadMapLayers;
+    byId("winLimit").onchange = loadMapLayers;
+
+    byId("clearSelBtn").onclick = () => {
+      selectedWindowId = null;
+      window._selectedStations = [];
+      highlightLayer.clearLayers();
+      probeLayer.clearLayers();
+      drawnLayer.clearLayers();
+      lastProbe = null;
+      top15Items = [];
+      top15Rank = {};
+      if (heatLayer) { map.removeLayer(heatLayer); heatLayer = null; }
+      countyLayer.clearLayers();
+      byId("showCounties").checked = false;
+      byId("perfLegendBlock").style.display = "none";
+      byId("windowCard").classList.remove("selected-box");
+      byId("windowSummary").textContent = "Set circle on map, then Analyze.";
+      byId("probeCoords").textContent = "lat — · lon —";
+      byId("chartEmpty").style.display = "block";
+      byId("chartEmpty").textContent = "Click Analyze — predicted curves for this ad-hoc circle.";
+      byId("chartHover").style.display = "none";
+      drawCurves(null);
+      restyleAllWindows();
+    };
+
+    byId("modeProbeBtn").onclick = () => setMapMode("probe");
+    byId("modeClickBtn").onclick = () => setMapMode("click");
+    byId("modeCircleBtn").onclick = () => setMapMode("circle");
+    byId("modePolyBtn").onclick = () => setMapMode("polygon");
+    byId("heatmapBtn").onclick = runHeatmap;
+    byId("showCounties").onchange = async () => {
+      if (byId("showCounties").checked) await loadCounties();
+      else countyLayer.clearLayers();
+    };
+
+    try {
+      initMap();
+      bindAnalyzeButton();
+      refreshHealth().then(() => loadMapLayers());
+      setTimeout(() => map.invalidateSize(), 300);
+    } catch (err) {
+      console.error("UI init failed", err);
+      const st = byId("statusLine");
+      if (st) { st.className = "status err"; st.textContent = "UI init error: " + err.message; }
+      bindAnalyzeButton();
+    }
+  </script>
+</body>
+</html>

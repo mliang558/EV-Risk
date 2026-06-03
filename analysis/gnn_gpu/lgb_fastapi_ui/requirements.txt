@@ -1,0 +1,12 @@
+fastapi
+uvicorn
+pandas
+numpy
+scikit-learn
+lightgbm
+joblib
+pyarrow
+geopandas
+shapely
+pygris
+pyarrow

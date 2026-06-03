@@ -1,0 +1,104 @@
+# Upload to step4_gpu/ (keep gnn/ subfolder)
+
+## Files to copy
+step6_train_gnn.py
+step7_evaluate_gnn.py
+step7_window_lgb_baseline.py
+step7_window_lgb_optuna.py
+step7_build_comparison_table.py
+step6_probe_bus.py          (optional)
+gnn/constants.py
+gnn/attack_targets.py
+gnn/train_utils.py
+gnn/models.py          *** 4-5层 GAT + Graph Transformer ***
+gnn/metrics.py          *** 必传（20 列 B+R 的 k=10 修复）***
+gnn/global_graph_features.py
+gnn/local_window_features.py
+gnn/edge_utils.py
+
+## 1) LightGBM — global (15-dim, B/R/Overall)
+PYTHONPATH=. $PY -u step7_window_lgb_baseline.py \
+  --data-dir . --reuse-features --attacks no-capacity \
+  --feature-set global --out results_gnn/lgb_global_br
+
+## 2) LightGBM — local only
+PYTHONPATH=. $PY -u step7_window_lgb_baseline.py \
+  --data-dir . --attacks no-capacity \
+  --feature-set local --out results_gnn/lgb_local_br
+
+## 3) LightGBM — local + global (optional, for +Global row)
+PYTHONPATH=. $PY -u step7_window_lgb_baseline.py \
+  --data-dir . --reuse-features --attacks no-capacity \
+  --feature-set both --out results_gnn/lgb_both_br
+
+## 4) Comparison table (reads JSON + GAT ckpts, no LGB re-train)
+PYTHONPATH=. $PY -u step7_build_comparison_table.py \
+  --from-artifacts --data-dir . \
+  --gat-global pyg/train_gat_global_br/best_model.pt \
+  --gat-plain pyg/train_gat_br/best_model.pt \
+  --out results_gnn/comparison_table
+
+Output: results_gnn/comparison_table/comparison_table.md
+
+---
+
+## 单任务：betweenness / random 分开训练（非 multi-task）
+
+上传: step6_train_gnn.py, step7_compare_single_vs_multitask.py, gnn/constants.py
+
+### GAT+Global — 只预测 betweenness（10 维）
+PYTHONPATH=. $PY -u step6_train_gnn.py \
+  --dataset pyg/pyg_dataset.pt --model gat --global-features \
+  --attack betweenness --out pyg/train_gat_global_betweenness
+
+### GAT+Global — 只预测 random（10 维）
+PYTHONPATH=. $PY -u step6_train_gnn.py \
+  --dataset pyg/pyg_dataset.pt --model gat --global-features \
+  --attack random --out pyg/train_gat_global_random
+
+（等价写法: --attacks betweenness  或  --attacks random）
+
+### 评估两个单任务 ckpt
+PYTHONPATH=. $PY -u step7_evaluate_gnn.py --dataset pyg/pyg_dataset.pt \
+  --checkpoint pyg/train_gat_global_betweenness/best_model.pt \
+  --out results_gnn/eval_gat_global_betweenness --no-plots
+
+PYTHONPATH=. $PY -u step7_evaluate_gnn.py --dataset pyg/pyg_dataset.pt \
+  --checkpoint pyg/train_gat_global_random/best_model.pt \
+  --out results_gnn/eval_gat_global_random --no-plots
+
+### 对比 multi-task vs single-task（拼 B/R 两列 R²）
+PYTHONPATH=. $PY -u step7_compare_single_vs_multitask.py --data-dir . \
+  --multitask pyg/train_gat_global_br/best_model.pt \
+  --betweenness pyg/train_gat_global_betweenness/best_model.pt \
+  --random pyg/train_gat_global_random/best_model.pt \
+  --eval-multitask results_gnn/eval_gat_global_br/test_metrics.json \
+  --out results_gnn/single_vs_multitask
+
+Output: results_gnn/single_vs_multitask/comparison.md
+
+### LightGBM 单任务（可选）
+PYTHONPATH=. $PY -u step7_window_lgb_baseline.py --data-dir . --reuse-features \
+  --attack betweenness --feature-set global --out results_gnn/lgb_global_betweenness
+
+PYTHONPATH=. $PY -u step7_window_lgb_baseline.py --data-dir . --reuse-features \
+  --attack random --feature-set global --out results_gnn/lgb_global_random
+
+---
+
+## 深层 GAT（4–5 层）或 Graph Transformer
+
+上传: gnn/models.py, step6_train_gnn.py, step7_evaluate_gnn.py
+
+# 5 层 GAT + Global，multi-task B+R
+PYTHONPATH=. $PY -u step6_train_gnn.py --dataset pyg/pyg_dataset.pt --model gat \
+  --num-layers 5 --global-features --attacks no-capacity \
+  --out pyg/train_gat_global_L5_br
+
+# 4 层 Graph Transformer + Global
+PYTHONPATH=. $PY -u step6_train_gnn.py --dataset pyg/pyg_dataset.pt --model transformer \
+  --num-layers 4 --global-features --attacks no-capacity \
+  --hidden 64 --gat-heads 4 \
+  --out pyg/train_gt_global_L4_br
+
+# 旧 2 层 ckpt 仍可评估（checkpoint 无 num_layers 时默认 2）

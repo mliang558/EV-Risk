@@ -6,7 +6,10 @@ This is the main script to run the complete analysis pipeline.
 """
 
 import sys
-from realistic_outage_simulator import RealisticOutageSimulator, run_multi_state_comparison
+from realistic_outage_simulator_improved import (
+    RealisticOutageSimulator,
+    run_multi_state_comparison,
+)
 from visualization import (
     plot_loss_distribution,
     plot_state_comparison,

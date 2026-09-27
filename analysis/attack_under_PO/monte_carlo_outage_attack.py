@@ -53,7 +53,7 @@ from attack_with_bootstrapped_outages import (
 from select_epicenter_by_stations import choose_station_epicenter_in_county
 from select_epicenter_by_population import (
     choose_epicenter_population_mode,
-    load_pop_units_if_available,
+    require_pop_units,
 )
 
 
@@ -215,11 +215,12 @@ def run_monte_carlo_for_state(
     """
     epicenter_mode
     --------------
-    population (default): population-weighted / station-KDE proxy within county.
+    population (default): census-tract population weighted (network-independent).
+        Requires data/processed/pop_units_epicenter.gpkg.
         Zero-loss events are expected (real outages often miss EV stations).
-    station: legacy — pick a hypernode in-county (near-guaranteed hit when
-        stations exist). Kept for ablation.
+    station: legacy on-node epicenter (appendix ablation only; inflates P(hit)).
     """
+    del kde_sigma_km  # legacy kw; station-KDE removed
     project_root = Path(__file__).resolve().parents[2]
     _write_mc_progress(state_name, sims_done=0, n_sims=n_sims, elapsed_min=0.0, remaining_min=0.0)
 
@@ -251,11 +252,7 @@ def run_monte_carlo_for_state(
     cov_df = load_coverage_history(project_root)
     county_polys = load_county_polygons(project_root)
     G = load_network(data_path)
-    pop_gdf = (
-        load_pop_units_if_available(project_root)
-        if epicenter_mode == "population"
-        else None
-    )
+    pop_gdf = require_pop_units(project_root) if epicenter_mode == "population" else None
     # Precompute baseline efficiency once to reuse across events
     try:
         E0 = nx.global_efficiency(G)
@@ -354,14 +351,12 @@ def run_monte_carlo_for_state(
                 epic_lons.append(p.x)
                 continue
 
-            # population mode
+            # population mode: census-tract only (no station-KDE)
             epic, _method = choose_epicenter_population_mode(
                 county_fips=fips_str,
                 poly=poly,
                 rng=rng,
-                G=G,
                 pop_gdf=pop_gdf,
-                sigma_km=kde_sigma_km,
             )
             if epic is None:
                 epic_lats.append(np.nan)
@@ -469,16 +464,22 @@ def run_monte_carlo_for_state(
             records.append(
                 {
                     "sim_id": sim_id,
+                    "seed": int(sim_id),
                     "year": int(row["year"]),
+                    "fips_str": str(fips_str).zfill(5),
+                    "epicenter_lat": float(epicenter_final[0]),
+                    "epicenter_lon": float(epicenter_final[1]),
+                    "hit": int(1 if n_disrupted > 0 else 0),
+                    "n_disrupted_nodes": int(n_disrupted),  # |S_i|
                     "eff_loss": eff_loss if eff_loss is not None else 0.0,
-                    "pct_eff_loss": pct_loss if pct_loss is not None else 0.0,
+                    "pct_eff_loss": pct_loss if pct_loss is not None else 0.0,  # ΔE/E
+                    "duration_hours": float(duration_h),  # T_i
                     "lcc_frac": lcc_frac_val,
                     "lcc_deficit": lcc_deficit,
                     "loss_x_duration": loss_x_duration,
                     "rel_loss_x_duration": rel_loss_x_duration,
                     "rel_lcc_loss_x_duration": rel_lcc_loss_x_duration,
                     "capacity_disrupted": cap_disrupted,
-                    "n_disrupted_nodes": n_disrupted,
                     "impact_radius_km": radius_km,
                     "customer_hours": customer_hours,
                     "used_state_pool_fallback": bool(
@@ -643,13 +644,7 @@ def main() -> None:
         type=str,
         default="population",
         choices=("population", "station"),
-        help="population (default): pop-weighted / station-KDE; station: legacy on-node.",
-    )
-    parser.add_argument(
-        "--kde-sigma-km",
-        type=float,
-        default=3.0,
-        help="Station-KDE jitter σ (km) when tract pop units unavailable.",
+        help="population (default): census-tract pop; station: legacy appendix ablation.",
     )
 
     args = parser.parse_args()
@@ -667,7 +662,6 @@ def main() -> None:
         member_states=members,
         capacity_weighted=args.capacity_weighted,
         epicenter_mode=args.epicenter_mode,
-        kde_sigma_km=args.kde_sigma_km,
     )
 
     os.makedirs(args.output_dir, exist_ok=True)

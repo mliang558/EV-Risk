@@ -19,6 +19,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import numpy as np
+
 from counterfactual_batch1.densify_network import NULL_REPLICATES
 
 # Shared intensity grid for dose-response (percent). Baseline = 0 is separate.
@@ -127,21 +129,27 @@ def batch1_scenarios() -> list[Scenario]:
             )
         )
     for pct in DOSE_PCTS:
-        scale = 1.0 - pct / 100.0
+        # CF-S: reduce affected customers by pct% ⇒ area ∝ N ⇒ R_c *= sqrt(1 - pct/100)
+        frac_cut = pct / 100.0
+        radius_scale = float(np.sqrt(max(0.0, 1.0 - frac_cut)))
         out.append(
             Scenario(
                 key=f"CF-S_m{pct}",
                 family="CF-S",
-                radius_scale=scale,
+                radius_scale=radius_scale,
                 dose_pct=float(pct),
-                description=f"OAT severity: impact radius R_c −{pct}%",
+                description=(
+                    f"OAT severity: N_affected −{pct}% "
+                    f"(R_c × √(1−{pct}/100) = ×{radius_scale:.4f})"
+                ),
             )
         )
+        scale_t = 1.0 - pct / 100.0
         out.append(
             Scenario(
                 key=f"CF-T_m{pct}",
                 family="CF-T",
-                duration_scale=scale,
+                duration_scale=scale_t,
                 dose_pct=float(pct),
                 description=f"OAT duration: T_i −{pct}%",
             )

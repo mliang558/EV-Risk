@@ -382,13 +382,16 @@ def densify_nevi(
     """
     NEVI corridor (main): every ``spacing_m`` along interstate, drop sites
     within ``cluster_radius_m`` of existing hypernodes, take largest gaps.
+
+    Dose target = ceil(pct * |V|). If corridor candidates run out (common in
+    small states at 50%), remaining slots are filled with population-weighted
+    placement (same rule as CF-D-pop). Meta records n_nevi / n_pop_fill.
     """
-    del member_state_abbrs, seed  # deterministic from geometry
     coords_ll, nodes = _node_coords(G)
     n0 = len(nodes)
     n_add = _n_target(n0, pct)
     if n_add == 0:
-        return G.copy(), {"n_added": 0, "mode": "nevi", "pct": pct}
+        return G.copy(), {"n_added": 0, "mode": "nevi", "pct": pct, "n_target": 0}
 
     existing_m = _to_epsg3857_meters(coords_ll[:, 0], coords_ll[:, 1])
     bbox = _bbox_from_graph(G)
@@ -397,14 +400,40 @@ def densify_nevi(
     lats, lons, dmin = _greedy_select_by_gap(
         cand_ll, existing_m, n_add, min_dist_m=cluster_radius_m
     )
+    n_nevi = len(lats)
+    n_short = n_add - n_nevi
+    n_pop_fill = 0
+    fill_note = ""
+
     H = _add_cf_nodes(G, lats, lons, prefix="cf_nevi", rule="nevi")
+
+    if n_short > 0:
+        # Fill remainder with population-weighted sites on the partially densified graph
+        H_fill, meta_fill = densify_pop(
+            H,
+            pct=0.0,
+            cluster_radius_m=cluster_radius_m,
+            member_state_abbrs=member_state_abbrs,
+            seed=int(seed) + 17,
+            n_add_exact=n_short,
+        )
+        # densify_pop rebuilds from H; count new nodes
+        n_pop_fill = int(meta_fill.get("n_added", 0))
+        H = H_fill
+        fill_note = (
+            f" Corridor shortfall {n_short}; filled {n_pop_fill} via population-weighted rule."
+        )
+
     meta = {
         "mode": "nevi",
         "intervention": "coverage_expansion_nevi",
         "pct": float(pct),
         "n_base": n0,
-        "n_added": len(lats),
         "n_target": n_add,
+        "n_added": int(n_nevi + n_pop_fill),
+        "n_nevi": int(n_nevi),
+        "n_pop_fill": int(n_pop_fill),
+        "n_shortfall_before_fill": int(max(0, n_short)),
         "n_candidates": int(len(cand_ll)),
         "n_candidates_eligible": int((dmin >= cluster_radius_m).sum()) if len(dmin) else 0,
         "spacing_m": float(spacing_m),
@@ -413,10 +442,13 @@ def densify_nevi(
         "n_nodes": H.number_of_nodes(),
         "n_edges": H.number_of_edges(),
         "capacity_used_by_efficiency": False,
+        "seed": int(seed),
         "note": (
             "NEVI-style: points every 50 mi on interstate corridors; "
-            "exclude <10 km from existing hypernodes; dose takes largest gaps. "
-            "Expanding coverage, not within-cluster densification."
+            "exclude <10 km from existing hypernodes; dose = ceil(pct*|V|). "
+            "If corridor candidates are exhausted, remaining slots use "
+            "population-weighted placement."
+            + fill_note
         ),
     }
     return H, meta
@@ -430,14 +462,15 @@ def densify_pop(
     member_state_abbrs: list[str] | None = None,
     seed: int = 42,
     max_tries_factor: int = 200,
+    n_add_exact: int | None = None,
 ) -> tuple[nx.Graph, dict]:
     """Population-weighted sampling in unit counties, >10 km from existing."""
     from shapely.geometry import Point
 
     coords_ll, nodes = _node_coords(G)
     n0 = len(nodes)
-    n_add = _n_target(n0, pct)
-    if n_add == 0:
+    n_add = int(n_add_exact) if n_add_exact is not None else _n_target(n0, pct)
+    if n_add <= 0:
         return G.copy(), {"n_added": 0, "mode": "pop", "pct": pct}
 
     rng = np.random.default_rng(seed)

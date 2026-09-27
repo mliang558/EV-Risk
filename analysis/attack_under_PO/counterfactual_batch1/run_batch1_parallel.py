@@ -8,12 +8,13 @@ Default out: results_cf_batch1_2023_pooled/
 Usage (cluster):
   export PYTHONPATH="$ROOT/analysis:$ROOT/analysis/attack_under_PO"
   python analysis/attack_under_PO/counterfactual_batch1/run_batch1_parallel.py \\
-      --n-sims 100 --workers 12 --families baseline,CF-D,CF-S
+      --n-sims 100 --workers 12 --families baseline,CF-D,CF-S,U,K
 
-Priority families: baseline,CF-D (NEVI corridor),CF-S
-# Optional: CF-D-pop, CF-D-null (10 reps), CF-T, U, K
+Priority families: baseline,CF-D (NEVI),CF-S (N_affected),U,K
+# Requires: data/processed/pop_units_epicenter.gpkg (census-tract epicenters)
+# Optional: CF-D-pop, CF-D-null; EPICENTER_MODE=station only for appendix ablation
 # Base nets: reuse outputs/network_graph_10km_2018_2026/2023 (do not rebuild).
-# Epicenters locked to baseline G; CF nodes never chosen as epicenter.
+# Epicenters: census-tract population only (never station-KDE).
 Optional later: CF-T,U,K
 """
 
@@ -115,6 +116,7 @@ def _worker(args: tuple) -> str:
         force,
         write_events,
         bootstrap_pool,
+        epicenter_mode,
     ) = args
 
     os.environ.setdefault("OMP_NUM_THREADS", "1")
@@ -154,6 +156,7 @@ def _worker(args: tuple) -> str:
         outage_year=None,  # pooled
         force=force,
         write_events=write_events,
+        epicenter_mode=epicenter_mode,
     )
 
 
@@ -180,11 +183,18 @@ def main() -> None:
     parser.add_argument(
         "--families",
         type=str,
-        default="baseline,CF-D,CF-S",
+        default="baseline,CF-D,CF-S,U,K",
         help="Comma families: baseline,CF-D,CF-D-pop,CF-D-null,CF-S,CF-T,U,K",
     )
     parser.add_argument("--keys", type=str, default="", help="Optional explicit scenario keys")
     parser.add_argument("--bootstrap-pool", choices=("all", "severe_top10"), default="all")
+    parser.add_argument(
+        "--epicenter-mode",
+        type=str,
+        default="population",
+        choices=("population", "station"),
+        help="population=census-tract (default); station=legacy appendix ablation",
+    )
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--no-events", action="store_true", help="Skip per-event gz dumps")
     args = parser.parse_args()
@@ -219,6 +229,8 @@ def main() -> None:
         "batch": "cf_batch1_2023_pooled",
         "network_year": NETWORK_YEAR,
         "outage_pool": "pooled_2018_2023",
+        "epicenter_mode": args.epicenter_mode,
+        "cf_s_definition": "N_affected -x% => R_c *= sqrt(1-x)",
         "n_sims": args.n_sims,
         "n_units": len(jobs),
         "scenarios": [s.key for s in sc],
@@ -249,6 +261,7 @@ def main() -> None:
             args.force,
             not args.no_events,
             args.bootstrap_pool,
+            args.epicenter_mode,
         )
         for j in jobs
     ]

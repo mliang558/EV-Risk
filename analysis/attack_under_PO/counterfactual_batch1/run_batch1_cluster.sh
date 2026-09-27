@@ -18,13 +18,14 @@ K5KM_ROOT="${K5KM_ROOT:-outputs/network_graph_5km_2018_2026}"
 N_SIMS="${N_SIMS:-100}"
 WORKERS="${WORKERS:-$(nproc 2>/dev/null || echo 8)}"
 # Priority: policy claim first
-FAMILIES="${FAMILIES:-baseline,CF-D,CF-S}"
+FAMILIES="${FAMILIES:-baseline,CF-D,CF-S,U,K}"
 ONLY="${ONLY:-}"
+EPICENTER_MODE="${EPICENTER_MODE:-population}"
 
 mkdir -p "$OUT" "$DENSIFY_CACHE"
 
 echo "[CF-B1] ROOT=$ROOT"
-echo "[CF-B1] OUT=$OUT N_SIMS=$N_SIMS WORKERS=$WORKERS FAMILIES=$FAMILIES"
+echo "[CF-B1] OUT=$OUT N_SIMS=$N_SIMS WORKERS=$WORKERS FAMILIES=$FAMILIES EPICENTER=$EPICENTER_MODE"
 
 # Optional: build 5 km nets if K is requested
 if [[ "$FAMILIES" == *K* ]]; then
@@ -43,6 +44,7 @@ ARGS=(
   --n-sims "$N_SIMS"
   --workers "$WORKERS"
   --families "$FAMILIES"
+  --epicenter-mode "$EPICENTER_MODE"
 )
 if [[ -n "$ONLY" ]]; then
   ARGS+=(--only "$ONLY")

@@ -40,7 +40,7 @@ FAMILY_LABEL = {
     "CF-D-pop": "Population-weighted",
     "CF-D-null": "Uniform null (mean of 10 reps)",
     "CF-D-within": "Within-cluster (beyond resolution)",
-    "CF-S": "Severity reduction (−% R_c)",
+    "CF-S": "Severity: N_aff −% (R_c×√(1−x))",
     "CF-T": "Duration reduction (−% T_i)",
 }
 
@@ -354,7 +354,7 @@ def main() -> None:
         "Navy: NEVI corridor coverage expansion (main; new hypernodes every 50 mi on "
         "interstate, excluding sites <10 km from existing). Green: population-weighted "
         "placement. Gray: uniform spatial null (mean of 10 replicates). "
-        "Red: severity reduction (−% impact radius). "
+        "Red: severity as N_affected −% (impact radius scaled by √(1−x)). "
         "Epicenters are frozen from the baseline network; new nodes are disruption "
         "targets only. Within-cluster densification/capacity are beyond model resolution. "
         "Curves show cross-state means ± SEM. No dollar conversion."

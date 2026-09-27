@@ -48,7 +48,7 @@ from sample_lambda_from_posterior import (
 from select_epicenter_by_stations import choose_station_epicenter_in_county
 from select_epicenter_by_population import (
     choose_epicenter_population_mode,
-    load_pop_units_if_available,
+    require_pop_units,
 )
 
 from counterfactual_batch1.densify_network import load_or_build_densified
@@ -89,13 +89,12 @@ def draw_crn_events(
     outage_year: int | None = None,
     epicenter_mode: str = "population",
     pop_gdf: Any = None,
-    kde_sigma_km: float = 3.0,
 ) -> pd.DataFrame:
     """
     One CRN draw: λ → n_events → bootstrap → radius → epicenter.
 
     Epicenter (lat, lon) frozen for all scenarios (CRN). Default population mode
-    uses tract pop units or station-KDE on the baseline graph; CF densify nodes
+    uses census-tract population only (network-independent). CF densify nodes
     never affect epicenter placement.
     """
     df_draw = draw_lambda_realization(county_post_df, flat_lam, random_state=sim_id)
@@ -159,9 +158,7 @@ def draw_crn_events(
             county_fips=fips_str,
             poly=poly,
             rng=rng,
-            G=G_for_epicenter,
             pop_gdf=pop_gdf,
-            sigma_km=kde_sigma_km,
         )
         if epic is None:
             epic_lats.append(np.nan)
@@ -226,6 +223,7 @@ def evaluate_events_on_graph(
             pct_loss = 0.0
 
         n_disrupted = len(_affected_nodes_in_radius(G, epicenter, radius_km))
+        hit = int(1 if n_disrupted > 0 else 0)
         lcc_deficit = max(0.0, 1.0 - float(lcc_frac))
         rel_loss_x_duration = float(pct_loss) * duration_h
         rel_lcc_loss_x_duration = lcc_deficit * duration_h
@@ -242,16 +240,17 @@ def evaluate_events_on_graph(
                 "fips_str": str(row["fips_str"]).zfill(5),
                 "epicenter_lat": epicenter[0],
                 "epicenter_lon": epicenter[1],
+                "hit": hit,
+                "n_disrupted_nodes": int(n_disrupted),  # |S_i|
                 "radius_base_km": float(row["radius_base_km"]),
                 "radius_km": float(radius_km),
-                "duration_hours": float(duration_h),
+                "duration_hours": float(duration_h),  # T_i
                 "duration_base_hours": float(row["duration_hours"]),
-                "pct_eff_loss": float(pct_loss),
+                "pct_eff_loss": float(pct_loss),  # ΔE/E
                 "eff_loss": float(eff_loss),
                 "rel_loss_x_duration": float(rel_loss_x_duration),
                 "rel_lcc_loss_x_duration": float(rel_lcc_loss_x_duration),
                 "lcc_frac": float(lcc_frac),
-                "n_disrupted_nodes": int(n_disrupted),
                 "customer_hours": nd * float(row["duration_hours"]),
                 "used_state_pool_fallback": bool(
                     row.get("used_state_pool_fallback", False)
@@ -272,8 +271,12 @@ def aggregate_sim_metrics(event_df: pd.DataFrame) -> dict[str, Any]:
     total_lcc = float(event_df["rel_lcc_loss_x_duration"].sum())
     L_lcc = total_lcc / n_nodes if n_nodes > 0 else float("nan")
     n_ev = int(len(event_df))
-    n_zero = int((event_df["pct_eff_loss"] <= 0).sum())
-    n_hit = max(0, n_ev - n_zero)
+    if "hit" in event_df.columns:
+        n_hit = int(event_df["hit"].sum())
+    else:
+        n_zero = int((event_df["pct_eff_loss"] <= 0).sum())
+        n_hit = max(0, n_ev - n_zero)
+    n_zero = n_ev - n_hit
     p_hit = float(n_hit / n_ev) if n_ev > 0 else float("nan")
     L_event = total_rel / n_ev if n_ev > 0 else float("nan")
     E_loss_hit = total_rel / n_hit if n_hit > 0 else float("nan")
@@ -354,7 +357,6 @@ def run_unit_batch1(
     force: bool = False,
     write_events: bool = True,
     epicenter_mode: str = "population",
-    kde_sigma_km: float = 3.0,
 ) -> str:
     """
     Run all Batch-1 scenarios for one analysis unit with shared CRN draws.
@@ -390,7 +392,7 @@ def run_unit_batch1(
     poly_dict = {row["fips_str"]: row["geometry"] for _, row in county_polys.iterrows()}
     urban_fips = urban_fips_from_mcc(county_geom_mcc, top_frac=0.25)
     pop_gdf = (
-        load_pop_units_if_available(project_root)
+        require_pop_units(project_root)
         if (epicenter_mode or "population").lower() == "population"
         else None
     )
@@ -446,7 +448,6 @@ def run_unit_batch1(
             outage_year=outage_year,
             epicenter_mode=epicenter_mode,
             pop_gdf=pop_gdf,
-            kde_sigma_km=kde_sigma_km,
         )
         if events.empty:
             continue

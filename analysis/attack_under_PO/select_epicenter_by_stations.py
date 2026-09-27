@@ -80,6 +80,8 @@ def choose_station_epicenter_in_county(
     county_attr: str = "county_fips",
     weight_attr: Optional[str] = None,
     rng: Optional[np.random.Generator] = None,
+    *,
+    exclude_cf_added: bool = True,
 ) -> Optional[Tuple[float, float]]:
     """
     在指定县内的 station 节点中随机选取一个作为 outage epicenter。
@@ -101,6 +103,10 @@ def choose_station_epicenter_in_county(
         否则在该县所有 station 中均匀随机选一个。
     rng : np.random.Generator, optional
         随机数生成器；若为 None，则使用 default_rng()。
+    exclude_cf_added : bool, default True
+        Skip counterfactual coverage-expansion nodes (``is_cf_added`` /
+        ``coverage_expansion``). CRN epicenters must come from the baseline
+        network; new nodes may only be covered by R_c, never chosen as epicenter.
 
     返回
     ----
@@ -115,11 +121,15 @@ def choose_station_epicenter_in_county(
     if not candidate_nodes:
         return None
 
-    # 过滤掉没有坐标的节点
+    # 过滤掉没有坐标的节点（以及 CF 加站节点，避免破坏 CRN）
     nodes_with_loc = []
     weights = []
     for node in candidate_nodes:
         data = G.nodes[node]
+        if exclude_cf_added and (
+            data.get("is_cf_added") or data.get("coverage_expansion")
+        ):
+            continue
         loc = _get_node_location(data)
         if loc is None:
             continue

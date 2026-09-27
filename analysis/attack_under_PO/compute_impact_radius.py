@@ -30,6 +30,23 @@ import pandas as pd
 import geopandas as gpd
 
 
+def resolve_county_shapefile(project_root: Path) -> Path:
+    """Find tl_2021_us_county.shp (repo parent, or attack_under_PO/demographic data)."""
+    here = Path(__file__).resolve().parent
+    candidates = [
+        project_root.parent / "tl_2021_us_county" / "tl_2021_us_county.shp",
+        project_root / "tl_2021_us_county" / "tl_2021_us_county.shp",
+        here / "demographic data" / "tl_2021_us_county.shp",
+        here / "module_3_03" / "demographic data" / "tl_2021_us_county.shp",
+    ]
+    for p in candidates:
+        if p.is_file():
+            return p
+    raise FileNotFoundError(
+        "County shapefile not found. Tried:\n  " + "\n  ".join(str(c) for c in candidates)
+    )
+
+
 STATE_NAME_TO_ABBR: Dict[str, str] = {
     "Alabama": "AL",
     "Alaska": "AK",
@@ -95,12 +112,8 @@ def load_county_geometry_and_mcc(project_root: Path) -> pd.DataFrame:
     - area_km2
     - rho (customers / km^2)
     """
-    ev_root = project_root.parent
-    shp_path = ev_root / "tl_2021_us_county" / "tl_2021_us_county.shp"
+    shp_path = resolve_county_shapefile(project_root)
     mcc_path = project_root / "notebooks" / "PO_data_cleaning" / "MCC.csv"
-
-    if not shp_path.exists():
-        raise FileNotFoundError(f"County shapefile not found: {shp_path}")
     if not mcc_path.exists():
         raise FileNotFoundError(f"MCC.csv not found: {mcc_path}")
 

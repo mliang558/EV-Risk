@@ -31,15 +31,30 @@ import geopandas as gpd
 from shapely.geometry import Point
 
 from sample_lambda_from_posterior import (
+    build_raw_lambda_draw,
+    load_county_estimates,
     load_posterior,
     draw_lambda_realization,
     aggregate_state_lambda,
     draw_state_event_counts,
     bootstrap_state_outages,
 )
-from compute_impact_radius import load_county_geometry_and_mcc, load_coverage_history, STATE_NAME_TO_ABBR
-from attack_with_bootstrapped_outages import compute_event_loss
+from compute_impact_radius import (
+    load_county_geometry_and_mcc,
+    load_coverage_history,
+    resolve_county_shapefile,
+    STATE_NAME_TO_ABBR,
+)
+from attack_with_bootstrapped_outages import (
+    _affected_nodes_in_radius,
+    compute_event_loss,
+    compute_event_loss_with_capacity,
+)
 from select_epicenter_by_stations import choose_station_epicenter_in_county
+from select_epicenter_by_population import (
+    choose_epicenter_population_mode,
+    load_pop_units_if_available,
+)
 
 
 def haversine_km(loc1: Tuple[float, float], loc2: Tuple[float, float]) -> float:
@@ -62,11 +77,7 @@ def load_network(data_path: Path) -> nx.Graph:
 
 def load_county_polygons(project_root: Path) -> gpd.GeoDataFrame:
     """Load county polygons (CONUS + DC) with fips_str."""
-    ev_root = project_root.parent
-    shp_path = ev_root / "tl_2021_us_county" / "tl_2021_us_county.shp"
-    if not shp_path.exists():
-        raise FileNotFoundError(f"County shapefile not found: {shp_path}")
-
+    shp_path = resolve_county_shapefile(project_root)
     gdf = gpd.read_file(shp_path)
     if "STATEFP" in gdf.columns:
         non_continental = {"02", "15", "72", "78", "60", "66", "69"}
@@ -154,15 +165,82 @@ def compute_radius_for_state_events(
     return df
 
 
+def _progress_dir() -> Path:
+    import os
+
+    env = os.environ.get("MC_PROGRESS_DIR")
+    if env:
+        d = Path(env)
+    else:
+        d = Path(__file__).resolve().parents[2] / "results_mc_10km_panel_2018_2026" / "_progress"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _write_mc_progress(
+    state_name: str,
+    *,
+    sims_done: int,
+    n_sims: int,
+    elapsed_min: float,
+    remaining_min: float,
+) -> None:
+    import json
+
+    safe = state_name.replace(" ", "_")
+    payload = {
+        "state": state_name,
+        "sims_done": sims_done,
+        "n_sims": n_sims,
+        "pct": round(100.0 * sims_done / n_sims, 1),
+        "elapsed_min": round(elapsed_min, 2),
+        "remaining_min": round(remaining_min, 2),
+    }
+    path = _progress_dir() / f"{safe}.json"
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
 def run_monte_carlo_for_state(
     state_name: str,
     data_path: Path,
     n_sims: int = 100,
+    *,
+    member_states: list[str] | None = None,
+    capacity_weighted: bool = False,
+    lambda_mode: str = "posterior",
+    bootstrap_pool: str = "all",
+    epicenter_mode: str = "population",
+    kde_sigma_km: float = 3.0,
 ) -> pd.DataFrame:
+    """
+    epicenter_mode
+    --------------
+    population (default): population-weighted / station-KDE proxy within county.
+        Zero-loss events are expected (real outages often miss EV stations).
+    station: legacy — pick a hypernode in-county (near-guaranteed hit when
+        stations exist). Kept for ablation.
+    """
     project_root = Path(__file__).resolve().parents[2]
+    _write_mc_progress(state_name, sims_done=0, n_sims=n_sims, elapsed_min=0.0, remaining_min=0.0)
 
     # Load static inputs
-    county_post_df, flat_lam = load_posterior()
+    lambda_mode = lambda_mode.lower().strip()
+    if lambda_mode not in ("posterior", "raw"):
+        raise ValueError(f"lambda_mode must be 'posterior' or 'raw', got {lambda_mode!r}")
+    bootstrap_pool = bootstrap_pool.lower().strip()
+    if bootstrap_pool not in ("all", "severe_top10"):
+        raise ValueError(
+            f"bootstrap_pool must be 'all' or 'severe_top10', got {bootstrap_pool!r}"
+        )
+    epicenter_mode = epicenter_mode.lower().strip()
+    if epicenter_mode not in ("population", "station"):
+        raise ValueError(
+            f"epicenter_mode must be 'population' or 'station', got {epicenter_mode!r}"
+        )
+    county_post_df = load_county_estimates()
+    flat_lam = None
+    if lambda_mode == "posterior":
+        county_post_df, flat_lam = load_posterior()
     outages_df = pd.read_csv(
         project_root
         / "notebooks"
@@ -173,6 +251,11 @@ def run_monte_carlo_for_state(
     cov_df = load_coverage_history(project_root)
     county_polys = load_county_polygons(project_root)
     G = load_network(data_path)
+    pop_gdf = (
+        load_pop_units_if_available(project_root)
+        if epicenter_mode == "population"
+        else None
+    )
     # Precompute baseline efficiency once to reuse across events
     try:
         E0 = nx.global_efficiency(G)
@@ -180,31 +263,42 @@ def run_monte_carlo_for_state(
         E0 = 0.0
 
     # Mapping from fips_str -> polygon (target state only)
-    abbr = STATE_NAME_TO_ABBR.get(state_name)
-    if abbr is None:
-        raise ValueError(f"No state abbreviation mapping for: {state_name}")
-    # STATEFP is numeric string; map abbr via standard mapping if necessary
-    state_polys = county_polys.copy()
+    target_states = list(member_states) if member_states else [state_name]
+    for s in target_states:
+        if STATE_NAME_TO_ABBR.get(s) is None:
+            raise ValueError(f"No state abbreviation mapping for: {s}")
 
+    state_polys = county_polys.copy()
     poly_dict = {row["fips_str"]: row["geometry"] for _, row in state_polys.iterrows()}
 
     all_yearly: list[pd.DataFrame] = []
+    all_sim_metrics: list[dict] = []
 
     import time
 
     t_start = time.time()
+    n_nodes = G.number_of_nodes() if G is not None else 0
 
     for sim_id in range(n_sims):
-        # 1) Draw λ realization
-        df_draw = draw_lambda_realization(county_post_df, flat_lam)
+        # 1) County λ: posterior draw or fixed raw MLE (n_events/n_years)
+        if lambda_mode == "posterior":
+            df_draw = draw_lambda_realization(
+                county_post_df, flat_lam, random_state=sim_id
+            )
+        else:
+            df_draw = build_raw_lambda_draw(county_post_df)
         state_df = aggregate_state_lambda(df_draw)
         state_df = draw_state_event_counts(state_df)
 
         # 2) Bootstrap outages (all states), then filter our target state
         boot_all = bootstrap_state_outages(
-            state_df, df_draw, outages_df, random_state=sim_id
+            state_df,
+            df_draw,
+            outages_df,
+            random_state=sim_id,
+            event_pool=bootstrap_pool,
         )
-        boot_state = boot_all[boot_all["sim_state"] == state_name].copy()
+        boot_state = boot_all[boot_all["sim_state"].isin(target_states)].copy()
         if boot_state.empty:
             continue
 
@@ -218,42 +312,63 @@ def run_monte_carlo_for_state(
                 raise ValueError("bootstrapped outages must contain 'year' or 'start_time'.")
 
         # 3) Compute radius for each event
-        boot_state = compute_radius_for_state_events(
-            boot_state, county_geom_mcc, cov_df, state_name
-        )
+        # Coverage / radius uses per-event state name (still one of the member states)
+        boot_chunks = []
+        for ev_state in boot_state["sim_state"].unique():
+            chunk = boot_state[boot_state["sim_state"] == ev_state]
+            boot_chunks.append(
+                compute_radius_for_state_events(
+                    chunk, county_geom_mcc, cov_df, str(ev_state)
+                )
+            )
+        boot_state = pd.concat(boot_chunks, axis=0, ignore_index=True)
 
-        # 3b) Assign epicenters per event.
-        # 优先在该县的站点中随机选一个 station 作为 epicenter；
-        # 若该县没有任何站点（或缺少坐标），则退回到县 polygon 内均匀采样。
+        # 3b) Assign epicenters per event (population-weighted by default).
+        # Zero-loss events are expected under population mode — real outages
+        # often miss EV stations. Epicenter coords feed L_event = P(hit)×E[loss|hit].
         rng = np.random.default_rng(sim_id)
         epic_lats = []
         epic_lons = []
         for _, row in boot_state.iterrows():
-            fips_str = row["fips_str"]
+            fips_str = str(row["fips_str"]).zfill(5)
+            poly = poly_dict.get(fips_str)
 
-            # 尝试：在该县的 station 中选 epicenter
-            station_epic = choose_station_epicenter_in_county(
-                G,
-                county_fips=fips_str,
-                county_attr="county_fips",
-                weight_attr=None,
-                rng=rng,
-            )
-            if station_epic is not None:
-                lat, lon = station_epic
-                epic_lats.append(lat)
-                epic_lons.append(lon)
+            if epicenter_mode == "station":
+                station_epic = choose_station_epicenter_in_county(
+                    G,
+                    county_fips=fips_str,
+                    county_attr="county_fips",
+                    weight_attr=None,
+                    rng=rng,
+                )
+                if station_epic is not None:
+                    epic_lats.append(station_epic[0])
+                    epic_lons.append(station_epic[1])
+                    continue
+                if poly is None:
+                    epic_lats.append(np.nan)
+                    epic_lons.append(np.nan)
+                    continue
+                p = sample_point_in_polygon(poly, rng)
+                epic_lats.append(p.y)
+                epic_lons.append(p.x)
                 continue
 
-            # 如果该县没有匹配的站点，退回到 county polygon 内均匀采样
-            poly = poly_dict.get(fips_str)
-            if poly is None:
+            # population mode
+            epic, _method = choose_epicenter_population_mode(
+                county_fips=fips_str,
+                poly=poly,
+                rng=rng,
+                G=G,
+                pop_gdf=pop_gdf,
+                sigma_km=kde_sigma_km,
+            )
+            if epic is None:
                 epic_lats.append(np.nan)
                 epic_lons.append(np.nan)
-                continue
-            p = sample_point_in_polygon(poly, rng)
-            epic_lats.append(p.y)
-            epic_lons.append(p.x)
+            else:
+                epic_lats.append(epic[0])
+                epic_lons.append(epic[1])
 
         boot_state["epicenter_lat"] = epic_lats
         boot_state["epicenter_lon"] = epic_lons
@@ -265,11 +380,18 @@ def run_monte_carlo_for_state(
 
         # 4) Attack network per event
         records = []
+        event_ch: list[float] = []
+        event_rel: list[float] = []
         NEG_TOL_SMALL = 1e-8
         NEG_TOL_LARGE = 1e-4
         for _, row in boot_state.iterrows():
             radius_km = float(row["impact_radius_km"])
-            duration_h = float(row.get("duration_hours", 1.0))
+            if "duration_hours" in row and pd.notna(row.get("duration_hours")):
+                duration_h = float(row["duration_hours"])
+            elif "duration_min" in row and pd.notna(row.get("duration_min")):
+                duration_h = float(row["duration_min"]) / 60.0
+            else:
+                duration_h = 1.0
             fips_str = row["fips_str"]
             poly = poly_dict.get(fips_str)
 
@@ -277,14 +399,35 @@ def run_monte_carlo_for_state(
             eff_loss = None
             eff_before = None
             eff_after = None
+            lcc_frac_val = 1.0
 
             max_tries = 3
             for attempt in range(max_tries):
                 epicenter = (row["epicenter_lat"], row["epicenter_lon"])
 
-                eff_before, eff_after, eff_loss, pct_loss = compute_event_loss(
-                    G, epicenter, radius_km, eff_before=E0
-                )
+                cap_disrupted = 0.0
+                if capacity_weighted:
+                    (
+                        eff_before,
+                        eff_after,
+                        eff_loss,
+                        pct_loss,
+                        _n_aff,
+                        cap_disrupted,
+                        lcc_frac_val,
+                    ) = compute_event_loss_with_capacity(
+                        G, epicenter, radius_km, eff_before=E0
+                    )
+                else:
+                    (
+                        eff_before,
+                        eff_after,
+                        eff_loss,
+                        pct_loss,
+                        lcc_frac_val,
+                    ) = compute_event_loss(
+                        G, epicenter, radius_km, eff_before=E0
+                    )
 
                 if pct_loss is not None and pct_loss < -NEG_TOL_LARGE:
                     # Large negative loss: warn and, if possible, resample epicenter within county
@@ -305,10 +448,23 @@ def run_monte_carlo_for_state(
                 eff_loss = 0.0
                 pct_loss = 0.0
 
-            # Paper formula: L_i = (relative loss) × duration
+            # L_i = (E(G)-E(G\\S))/E(G) × T_i  (paper); optional × C_{S_i}
             rel_loss_x_duration = pct_loss * duration_h
-            # Keep absolute-efficiency × duration for backward compatibility
+            if capacity_weighted:
+                rel_loss_x_duration *= cap_disrupted
             loss_x_duration = eff_loss * duration_h if eff_loss is not None else 0.0
+
+            lcc_deficit = max(0.0, 1.0 - float(lcc_frac_val))
+            rel_lcc_loss_x_duration = lcc_deficit * duration_h
+
+            epicenter_final = (row["epicenter_lat"], row["epicenter_lon"])
+            n_disrupted = len(
+                _affected_nodes_in_radius(G, epicenter_final, radius_km)
+            )
+            nd = float(row.get("Nd", row.get("affected_customers", 0.0)) or 0.0)
+            customer_hours = nd * duration_h
+            event_ch.append(customer_hours)
+            event_rel.append(rel_loss_x_duration)
 
             records.append(
                 {
@@ -316,8 +472,18 @@ def run_monte_carlo_for_state(
                     "year": int(row["year"]),
                     "eff_loss": eff_loss if eff_loss is not None else 0.0,
                     "pct_eff_loss": pct_loss if pct_loss is not None else 0.0,
+                    "lcc_frac": lcc_frac_val,
+                    "lcc_deficit": lcc_deficit,
                     "loss_x_duration": loss_x_duration,
                     "rel_loss_x_duration": rel_loss_x_duration,
+                    "rel_lcc_loss_x_duration": rel_lcc_loss_x_duration,
+                    "capacity_disrupted": cap_disrupted,
+                    "n_disrupted_nodes": n_disrupted,
+                    "impact_radius_km": radius_km,
+                    "customer_hours": customer_hours,
+                    "used_state_pool_fallback": bool(
+                        row.get("used_state_pool_fallback", False)
+                    ),
                 }
             )
 
@@ -336,37 +502,97 @@ def run_monte_carlo_for_state(
                 total_loss_x_duration=("loss_x_duration", "sum"),
                 # Annual Loss in the paper: sum_i (relative loss_i × duration_i)
                 total_rel_loss_x_duration=("rel_loss_x_duration", "sum"),
+                total_rel_lcc_loss_x_duration=("rel_lcc_loss_x_duration", "sum"),
                 mean_pct_eff_loss=("pct_eff_loss", "mean"),
+                mean_lcc_frac=("lcc_frac", "mean"),
+                total_capacity_disrupted=("capacity_disrupted", "sum"),
             )
             .reset_index()
             .rename(columns={"year_pooled": "year"})
         )
         yearly["sim_id"] = sim_id
-        # Same baseline efficiency E(G) and |V| for all sims of this state
         yearly["baseline_efficiency"] = E0
-        n_nodes = G.number_of_nodes() if G is not None else 0
+        yearly["capacity_weighted"] = capacity_weighted
+        yearly["n_nodes"] = n_nodes
+        L_tilde = 0.0
+        L_lcc_tilde = 0.0
         if n_nodes > 0:
-            # Node-normalized Annual Loss for THIS sim (already MC-iteration specific)
-            yearly["node_normalized_loss"] = (
-                yearly["total_rel_loss_x_duration"] / n_nodes
-            )
+            L_tilde = float(yearly["total_rel_loss_x_duration"].iloc[0] / n_nodes)
+            L_lcc_tilde = float(yearly["total_rel_lcc_loss_x_duration"].iloc[0] / n_nodes)
+            yearly["node_normalized_loss"] = L_tilde
+            yearly["node_normalized_lcc_loss"] = L_lcc_tilde
+
+        # Sensitivity: normal = below-median severity events; severe = top quartile
+        L_normal = L_severe = 0.0
+        if n_nodes > 0 and event_ch:
+            ch_arr = np.asarray(event_ch, dtype=float)
+            rel_arr = np.asarray(event_rel, dtype=float)
+            med = float(np.median(ch_arr))
+            p75 = float(np.percentile(ch_arr, 75))
+            L_normal = float(rel_arr[ch_arr <= med].sum() / n_nodes)
+            L_severe = float(rel_arr[ch_arr >= p75].sum() / n_nodes)
+
+        n_ev = int(df_events.shape[0])
+        n_zero = int((df_events["pct_eff_loss"] <= 0).sum())
+        n_hit = max(0, n_ev - n_zero)
+        p_hit = float(n_hit / n_ev) if n_ev > 0 else float("nan")
+        # L_event = mean_i (ΔE/E · T_i) = P(hit) × E[loss | hit]
+        total_rel = float(df_events["rel_loss_x_duration"].sum())
+        L_event = total_rel / n_ev if n_ev > 0 else float("nan")
+        E_loss_hit = total_rel / n_hit if n_hit > 0 else float("nan")
+
+        all_sim_metrics.append(
+            {
+                "sim_id": sim_id,
+                "L_tilde": L_tilde,
+                "L_lcc_tilde": L_lcc_tilde,
+                "mean_lcc_frac": float(df_events["lcc_frac"].mean()),
+                "n_events": n_ev,
+                "n_disrupted_nodes_mean": float(df_events["n_disrupted_nodes"].mean()),
+                "outage_severity_mean": float(df_events["customer_hours"].mean()),
+                "n_zero_loss_events": n_zero,
+                "n_hit_events": n_hit,
+                "P_hit": p_hit,
+                "L_event": L_event,
+                "E_loss_given_hit": E_loss_hit,
+                "max_disruption_radius_km": float(df_events["impact_radius_km"].max()),
+                "n_fallback_events": int(df_events["used_state_pool_fallback"].sum()),
+                "L_tilde_normal": L_normal,
+                "L_tilde_severe": L_severe,
+                "epicenter_mode": epicenter_mode,
+            }
+        )
         all_yearly.append(yearly)
 
-        # 简单进度 & 剩余时间估计（每 10 次或最后一次打印）
-        if (sim_id + 1) % 10 == 0 or (sim_id + 1) == n_sims:
+        # 进度条：每 5 次或最后一次（并行时各 worker 各打一行）
+        if (sim_id + 1) % 5 == 0 or (sim_id + 1) == n_sims:
             elapsed = time.time() - t_start
             sims_done = sim_id + 1
             avg_per_sim = elapsed / sims_done
             remaining = avg_per_sim * (n_sims - sims_done)
-            print(
-                f"[MC] {sims_done}/{n_sims} sims done "
-                f"(elapsed {elapsed/60:.1f} min, est. remaining {remaining/60:.1f} min)"
+            pct = 100.0 * sims_done / n_sims
+            bar_w = 30
+            filled = int(bar_w * sims_done / n_sims)
+            bar = "#" * filled + "-" * (bar_w - filled)
+            msg = (
+                f"[MC] {state_name} |{bar}| {sims_done}/{n_sims} ({pct:.0f}%) "
+                f"elapsed {elapsed/60:.1f} min, est. remaining {remaining/60:.1f} min"
+            )
+            print(msg, flush=True)
+            _write_mc_progress(
+                state_name,
+                sims_done=sims_done,
+                n_sims=n_sims,
+                elapsed_min=elapsed / 60,
+                remaining_min=remaining / 60,
             )
 
     if not all_yearly:
-        return pd.DataFrame()
+        return pd.DataFrame(), pd.DataFrame()
 
-    return pd.concat(all_yearly, axis=0, ignore_index=True)
+    yearly_out = pd.concat(all_yearly, axis=0, ignore_index=True)
+    sim_out = pd.DataFrame(all_sim_metrics)
+    return yearly_out, sim_out
 
 
 def main() -> None:
@@ -377,7 +603,18 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Monte Carlo outage-attack simulation using posterior λ."
     )
-    parser.add_argument("--state", type=str, required=True, help="State name.")
+    parser.add_argument(
+        "--state",
+        type=str,
+        required=True,
+        help="State or region label for outputs (e.g. 'Chesapeake region').",
+    )
+    parser.add_argument(
+        "--member-states",
+        type=str,
+        default="",
+        help="Comma-separated full state names for merged regions (e.g. 'Delaware,Maryland').",
+    )
     parser.add_argument(
         "--data-path",
         type=str,
@@ -396,6 +633,24 @@ def main() -> None:
         default="results",
         help="Directory to save Monte Carlo yearly losses.",
     )
+    parser.add_argument(
+        "--capacity-weighted",
+        action="store_true",
+        help="Optional: multiply each event by disrupted capacity C_S (default: pure topology)",
+    )
+    parser.add_argument(
+        "--epicenter-mode",
+        type=str,
+        default="population",
+        choices=("population", "station"),
+        help="population (default): pop-weighted / station-KDE; station: legacy on-node.",
+    )
+    parser.add_argument(
+        "--kde-sigma-km",
+        type=float,
+        default=3.0,
+        help="Station-KDE jitter σ (km) when tract pop units unavailable.",
+    )
 
     args = parser.parse_args()
 
@@ -404,10 +659,15 @@ def main() -> None:
     if not data_path.exists():
         raise FileNotFoundError(f"Network pickle not found: {data_path}")
 
-    yearly_mc = run_monte_carlo_for_state(
+    members = [s.strip() for s in args.member_states.split(",") if s.strip()] or None
+    yearly_mc, _sim_mc = run_monte_carlo_for_state(
         state_name=state_name,
         data_path=data_path,
         n_sims=args.n_sims,
+        member_states=members,
+        capacity_weighted=args.capacity_weighted,
+        epicenter_mode=args.epicenter_mode,
+        kde_sigma_km=args.kde_sigma_km,
     )
 
     os.makedirs(args.output_dir, exist_ok=True)
@@ -416,7 +676,7 @@ def main() -> None:
     )
     yearly_mc.to_csv(out_path, index=False)
 
-    print(f"✓ Saved Monte Carlo yearly losses to: {out_path}")
+    print(f"[OK] Saved Monte Carlo yearly losses to: {out_path}")
     print(yearly_mc.head())
 
     # Monte Carlo average of Annual Loss (relative-loss-based) and node-normalized metric
@@ -450,6 +710,8 @@ def main() -> None:
                 "n_nodes": [n_nodes],
                 "node_normalized_loss": [node_norm_loss],
                 "baseline_efficiency": [E0],
+                "capacity_weighted": [args.capacity_weighted],
+                "n_sims": [args.n_sims],
             }
         )
         summary_df.to_csv(summary_path, index=False)

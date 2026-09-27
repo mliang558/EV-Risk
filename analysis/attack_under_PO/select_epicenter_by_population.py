@@ -1,62 +1,50 @@
 #!/usr/bin/env python3
 """
-Utilities for sampling outage epicenters using population density.
+Utilities for sampling outage epicenters using population (or a population proxy).
 
-Motivation / 依据
-----------------
-- 真实世界里，大规模停电事件的“中心”更可能出现在人口和负荷集中的区域
-  （例如变电站附近、城市中心），而不是县内任意一点都等概率。
-- 如果我们已经有 finer-scale 的人口空间数据（census block / tract 等），
-  可以用人口作为权重来选 epicenter，更贴近“人在哪儿、电网风险在哪儿”。
+Within the outage county (already chosen by the λ-bootstrap), we sample an
+epicenter so that denser / more populated places are more likely. Missing a
+charging hypernode is *not* a bug — most real outages do not hit EV stations;
+zero-loss events are substantive.
 
-核心思想
---------
-1. 把县内划分成若干人口单元（例如 census block，多边形），每个单元有：
-   - geometry : 多边形
-   - population : 该单元人口（或加权负荷）
-   - county_fips : 所在县 FIPS（与 outage 事件的 county fips 对应）
-2. 对于一次 outage 事件，在对应县的所有单元中，按 population 作为权重做加权抽样：
-   - 先随机选中一个人口单元（概率 ∝ population）
-   - 然后在该多边形内部均匀抽样一个点，作为本次 outage 的 epicenter
+Methods (first available wins)
+-----------------------------
+1. ``tract`` — census-tract polygons with population
+   (``data/processed/pop_units_epicenter.gpkg`` if present).
+2. ``station_kde`` — Gaussian mixture centered on existing hypernodes in the
+   county (σ default 3 km). Stations track population; this raises hit rates
+   vs uniform county sampling while still allowing misses (recommended default
+   when tracts are unavailable).
+3. ``county_uniform`` — uniform in the county polygon (last resort).
 
-这样做后：
-- 县内人口高的区域更容易成为 outage epicenter；
-- 仍然保持 Monte Carlo 的随机性，只是有了“人越多越容易被打”的物理依据。
-
-注意：本文件不直接修改主仿真脚本，只提供通用函数，方便在
-`monte_carlo_outage_attack.py` 或其他脚本中按需调用。
+Used by ``monte_carlo_outage_attack.py`` and CF Batch-1 CRN engine.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
+from pathlib import Path
+from typing import Optional, Tuple
 
 import numpy as np
-import geopandas as gpd
-from shapely.geometry import Point
+import networkx as nx
+
+try:
+    import geopandas as gpd
+    from shapely.geometry import Point
+except Exception:  # pragma: no cover
+    gpd = None
+    Point = None  # type: ignore
 
 
 @dataclass
 class PopulationUnitSchema:
-    """
-    列名约定（你的人口数据只要能映射成这个 schema 就可以用）：
-
-    - county_fips_col : 县级 FIPS，字符串形式，长度 5，例如 "06037"
-    - population_col  : 该空间单元人口数（或其他负荷 proxy）
-    - geometry_col    : 多边形 geometry
-    """
-
     county_fips_col: str = "county_fips"
     population_col: str = "population"
     geometry_col: str = "geometry"
 
 
-def sample_point_in_polygon(poly, rng: np.random.Generator) -> Point:
-    """
-    Uniform-ish random point inside polygon via rejection sampling.
-    和项目里其他地方用的一致，只是单独放在这里复用。
-    """
+def sample_point_in_polygon(poly, rng: np.random.Generator):
     minx, miny, maxx, maxy = poly.bounds
     for _ in range(100):
         x = rng.uniform(minx, maxx)
@@ -64,102 +52,175 @@ def sample_point_in_polygon(poly, rng: np.random.Generator) -> Point:
         p = Point(x, y)
         if poly.contains(p):
             return p
-    # Fallback to representative point if rejection fails
     return poly.representative_point()
 
 
-def load_population_units(path: str) -> gpd.GeoDataFrame:
-    """
-    读取人口空间数据（census block / tract 等）。
-
-    参数
-    ----
-    path : str
-        支持任意 GeoPandas 能读的格式（shapefile, GeoJSON, GeoPackage 等）。
-
-    返回
-    ----
-    gdf : GeoDataFrame
-        包含至少 geometry 列。其他列名由调用者与 PopulationUnitSchema 协调。
-    """
+def load_population_units(path: str | Path):
+    if gpd is None:
+        raise ImportError("geopandas required for population units")
     gdf = gpd.read_file(path)
     if "geometry" not in gdf.columns:
         raise ValueError("Population GeoDataFrame must contain a 'geometry' column.")
     return gdf
 
 
+def resolve_pop_units_path(project_root: Path) -> Path | None:
+    candidates = [
+        project_root / "data" / "processed" / "pop_units_epicenter.gpkg",
+        project_root / "data" / "processed" / "pop_units_epicenter.parquet",
+    ]
+    for p in candidates:
+        if p.is_file():
+            return p
+    return None
+
+
 def choose_population_weighted_epicenter(
     county_fips: str,
-    pop_gdf: gpd.GeoDataFrame,
+    pop_gdf,
     schema: Optional[PopulationUnitSchema] = None,
     rng: Optional[np.random.Generator] = None,
-) -> Optional[Point]:
-    """
-    在某个县内按人口密度（人口权重）选择 outage epicenter。
-
-    参数
-    ----
-    county_fips : str
-        五位县级 FIPS，比如 "06037"。会自动 zero-pad 到 5 位。
-    pop_gdf : GeoDataFrame
-        人口空间单元数据，至少包含：
-        - county_fips_col（schema 里定义）
-        - population_col
-        - geometry_col（多边形）
-    schema : PopulationUnitSchema, optional
-        定义列名的 schema。如果 None，则使用默认列名：
-        - county_fips
-        - population
-        - geometry
-    rng : np.random.Generator, optional
-        随机数生成器；如果 None，则使用 default_rng()。
-
-    返回
-    ----
-    epicenter : shapely.geometry.Point 或 None
-        若在该县找不到任何人口单元，则返回 None。
-    """
+):
+    """Tract / block units: sample unit ∝ population, then uniform in polygon."""
     if schema is None:
         schema = PopulationUnitSchema()
-
     if rng is None:
         rng = np.random.default_rng()
 
     fips_str = str(county_fips).zfill(5)
-
-    # 过滤出目标县的人口单元
     sub = pop_gdf[
         pop_gdf[schema.county_fips_col].astype(str).str.zfill(5) == fips_str
     ].copy()
     if sub.empty:
         return None
 
-    if schema.population_col not in sub.columns:
-        raise ValueError(
-            f"Population column '{schema.population_col}' not found in population GeoDataFrame."
-        )
-
-    # 权重向量（人口），需要保证非负且总和 > 0
     weights = np.asarray(sub[schema.population_col], dtype=float).clip(min=0.0)
     total_w = weights.sum()
-    if total_w <= 0:
-        # 该县人口列异常，退回到简单均匀抽样单元
-        probs = None
-    else:
-        probs = weights / total_w
-
-    # 在县内所有人口单元中，加权（或均匀）选一个多边形
-    idx_choices = np.arange(len(sub))
-    chosen_idx = rng.choice(idx_choices, p=probs)
+    probs = weights / total_w if total_w > 0 else None
+    chosen_idx = rng.choice(np.arange(len(sub)), p=probs)
     poly = sub.iloc[chosen_idx][schema.geometry_col]
-
-    # 在所选多边形内部均匀抽样 epicenter
     return sample_point_in_polygon(poly, rng)
+
+
+def _stations_in_county(
+    G: nx.Graph,
+    county_fips: str,
+    county_attr: str = "county_fips",
+) -> list[Tuple[float, float]]:
+    target = str(county_fips).zfill(5)
+    out: list[Tuple[float, float]] = []
+    for _, data in G.nodes(data=True):
+        if data.get("is_cf_added") or data.get("coverage_expansion"):
+            continue
+        fips = data.get(county_attr)
+        if fips is None or str(fips).zfill(5) != target:
+            continue
+        loc = data.get("location")
+        if loc is not None and isinstance(loc, (tuple, list)) and len(loc) == 2:
+            out.append((float(loc[0]), float(loc[1])))
+        elif "lat" in data and "lon" in data:
+            out.append((float(data["lat"]), float(data["lon"])))
+    return out
+
+
+def choose_station_kde_epicenter(
+    G: nx.Graph,
+    county_fips: str,
+    poly,
+    rng: np.random.Generator,
+    *,
+    sigma_km: float = 3.0,
+    county_attr: str = "county_fips",
+    max_tries: int = 80,
+) -> Optional[Tuple[float, float]]:
+    """
+    Population proxy: pick a station in-county, jitter by N(0, σ) in km,
+    reject if outside county polygon. Raises hit rate vs uniform while
+    still allowing zero-loss events.
+    """
+    stations = _stations_in_county(G, county_fips, county_attr=county_attr)
+    if not stations:
+        return None
+    # degrees ≈ km / 111
+    sig_deg = float(sigma_km) / 111.0
+    for _ in range(max_tries):
+        lat0, lon0 = stations[int(rng.integers(0, len(stations)))]
+        lat = float(lat0 + rng.normal(0.0, sig_deg))
+        # longitude scale by cos(lat)
+        lon = float(lon0 + rng.normal(0.0, sig_deg / max(0.2, np.cos(np.deg2rad(lat0)))))
+        if poly is not None and Point is not None:
+            if not poly.contains(Point(lon, lat)):
+                continue
+        return lat, lon
+    # fallback: exact station (still a hit — rare)
+    lat0, lon0 = stations[int(rng.integers(0, len(stations)))]
+    return float(lat0), float(lon0)
+
+
+def choose_epicenter_population_mode(
+    *,
+    county_fips: str,
+    poly,
+    rng: np.random.Generator,
+    G: nx.Graph | None = None,
+    pop_gdf=None,
+    schema: Optional[PopulationUnitSchema] = None,
+    sigma_km: float = 3.0,
+) -> Tuple[Optional[Tuple[float, float]], str]:
+    """
+    Returns ((lat, lon) or None, method_tag).
+
+    method_tag ∈ {tract, station_kde, county_uniform, none}
+    """
+    fips = str(county_fips).zfill(5)
+
+    if pop_gdf is not None:
+        pt = choose_population_weighted_epicenter(fips, pop_gdf, schema=schema, rng=rng)
+        if pt is not None:
+            # shapely Point: x=lon, y=lat
+            return (float(pt.y), float(pt.x)), "tract"
+
+    if G is not None:
+        kde = choose_station_kde_epicenter(
+            G, fips, poly, rng, sigma_km=sigma_km
+        )
+        if kde is not None:
+            return kde, "station_kde"
+
+    if poly is not None and Point is not None:
+        p = sample_point_in_polygon(poly, rng)
+        return (float(p.y), float(p.x)), "county_uniform"
+
+    return None, "none"
+
+
+def load_pop_units_if_available(project_root: Path):
+    """Load tract pop units if cached; else None (station_kde will be used)."""
+    path = resolve_pop_units_path(project_root)
+    if path is None or gpd is None:
+        return None
+    gdf = gpd.read_file(path)
+    # normalize columns
+    if "county_fips" not in gdf.columns:
+        if "GEOID" in gdf.columns:
+            gdf["county_fips"] = gdf["GEOID"].astype(str).str.zfill(11).str[:5]
+        elif "tract_geoid" in gdf.columns:
+            gdf["county_fips"] = gdf["tract_geoid"].astype(str).str.zfill(11).str[:5]
+    if "population" not in gdf.columns:
+        for c in ("POPESTIMATE2023", "pop", "P1_001N"):
+            if c in gdf.columns:
+                gdf["population"] = gdf[c]
+                break
+    return gdf
 
 
 __all__ = [
     "PopulationUnitSchema",
     "load_population_units",
+    "load_pop_units_if_available",
     "choose_population_weighted_epicenter",
+    "choose_station_kde_epicenter",
+    "choose_epicenter_population_mode",
+    "sample_point_in_polygon",
+    "resolve_pop_units_path",
 ]
-

@@ -1,0 +1,61 @@
+# Counterfactual Batch 1 (+ A/B persistence) — upload list for cluster
+# Suggested server root: same as Bayesian MC (Pro_directory)
+
+## NEW code only (does not replace existing MC scripts)
+
+analysis/attack_under_PO/counterfactual_batch1/__init__.py
+analysis/attack_under_PO/counterfactual_batch1/scenarios.py
+analysis/attack_under_PO/counterfactual_batch1/densify_network.py
+analysis/attack_under_PO/counterfactual_batch1/urban_counties.py
+analysis/attack_under_PO/counterfactual_batch1/crn_engine.py
+analysis/attack_under_PO/counterfactual_batch1/run_batch1_parallel.py
+analysis/attack_under_PO/counterfactual_batch1/run_batch_ab_parallel.py
+analysis/attack_under_PO/counterfactual_batch1/build_5km_networks_2023.py
+analysis/attack_under_PO/counterfactual_batch1/build_cf_d_networks.py
+analysis/attack_under_PO/counterfactual_batch1/run_batch1_cluster.sh
+analysis/attack_under_PO/counterfactual_batch1/run_batch_ab_cluster.sh
+analysis/attack_under_PO/counterfactual_batch1/analyze_dose_response.py
+analysis/attack_under_PO/counterfactual_batch1/README.md
+analysis/attack_under_PO/counterfactual_batch1/UPLOAD_LIST_BATCH1.txt
+
+## Existing deps (already on cluster if Bayesian MC ran)
+
+analysis/attack_under_PO/monte_carlo_outage_attack.py
+analysis/attack_under_PO/sample_lambda_from_posterior.py
+analysis/attack_under_PO/compute_impact_radius.py
+analysis/attack_under_PO/attack_with_bootstrapped_outages.py
+analysis/attack_under_PO/select_epicenter_by_stations.py
+analysis/attack_under_PO/select_epicenter_by_population.py
+analysis/attack_under_PO/section_4_3_exposure_structure.py
+analysis/attack_under_PO/region_merge_config.py
+analysis/attack_under_PO/mc_panel_metrics.py
+analysis/build_10km_panel_2018_2026.py
+analysis/build_charging_network_step2.py
+analysis/run_charging_network.py
+analysis/prepare_stations.py
+
+## Data / networks (do not re-upload if present)
+
+outputs/network_graph_10km_2018_2026/2023/   # REQUIRED base nets (reuse; do not rebuild)
+advi_results_2018_2023/county_advi_posterior.nc
+advi_results_2018_2023/county_estimates_advi.csv
+notebooks/PO_data_cleaning/cleaned_outages_2018_2023.csv
+tl_2021_us_county/   # or whatever resolve_county_shapefile uses
+analysis/attack_under_PO/module_3_03/demographic data/merged_output.csv  # pop-weighted CF-D
+# Interstate / AFC corridors (NEVI rule) — place next to Pro_directory or symlink:
+#   ../Highway/us_interstate_highways.shp/
+#   or ../PrimaryRoads/tl_2022_us_primaryroads/ (RTTYP=I filter)
+data/processed/stations_2023_48states.csv   # only if building 5 km nets
+
+## NEW outputs (created on cluster — download these)
+
+results_cf_batch1_2023_pooled/
+outputs/network_graph_cf_densify_2023/       # densified overlays (nevi/pop/uniform)
+outputs/network_graph_5km_2018_2026/        # if K run
+results_cf_batchA_year_matched/             # if A run
+results_cf_batchB_net2023_outage_year/      # if B run
+
+## DO NOT overwrite
+
+results_mc_10km_panel_2018_2026/
+analysis/attack_under_PO/run_mc_10km_panel_parallel.py

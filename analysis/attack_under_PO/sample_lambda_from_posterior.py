@@ -61,6 +61,29 @@ def load_posterior() -> tuple[pd.DataFrame, np.ndarray]:
     return county_df, flat_lam
 
 
+def load_county_estimates() -> pd.DataFrame:
+    """County table with lambda_raw and lambda_mean (posterior mean)."""
+    project_root = Path(__file__).resolve().parents[2]
+    county_csv = project_root / "advi_results_2018_2023" / "county_estimates_advi.csv"
+    if not county_csv.is_file():
+        raise FileNotFoundError(f"County estimates CSV not found: {county_csv}")
+    return pd.read_csv(county_csv)
+
+
+def build_raw_lambda_draw(county_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Fixed county λ from empirical event rates (lambda_raw = n_events / n_years).
+
+    Same schema as draw_lambda_realization output for downstream bootstrap.
+    """
+    if "lambda_raw" not in county_df.columns:
+        raise ValueError("county_df must contain 'lambda_raw'")
+    df_draw = county_df.copy()
+    df_draw["lambda_draw"] = pd.to_numeric(df_draw["lambda_raw"], errors="coerce").fillna(0.0)
+    df_draw["lambda_draw"] = df_draw["lambda_draw"].clip(lower=1e-8)
+    return df_draw
+
+
 def draw_lambda_realization(
     county_df: pd.DataFrame,
     flat_lam: np.ndarray,
@@ -159,11 +182,43 @@ def draw_state_event_counts(state_df: pd.DataFrame, random_state: int | None = N
     return state_df
 
 
+def prepare_outages_for_bootstrap(outages_df: pd.DataFrame) -> pd.DataFrame:
+    """Add duration_hours and ACO (affected-customer-outage hours) columns."""
+    df = outages_df.copy()
+    if "fips" in df.columns:
+        df["fips_str"] = df["fips"].astype(int).astype(str).str.zfill(5)
+    if "duration_hours" not in df.columns:
+        if "duration_min" in df.columns:
+            df["duration_hours"] = df["duration_min"].astype(float) / 60.0
+        else:
+            df["duration_hours"] = 1.0
+    cust_col = (
+        "mean_customers"
+        if "mean_customers" in df.columns
+        else ("affected_customers" if "affected_customers" in df.columns else None)
+    )
+    if cust_col is None:
+        raise ValueError("outages_df must contain mean_customers or affected_customers.")
+    df["aco"] = df[cust_col].astype(float) * df["duration_hours"].astype(float)
+    return df
+
+
+def filter_top_aco_pool(events: pd.DataFrame, top_pct: float = 0.10) -> pd.DataFrame:
+    """Keep the top `top_pct` fraction of events by ACO (at least one row)."""
+    if events.empty:
+        return events
+    n_keep = max(1, int(np.ceil(len(events) * top_pct)))
+    return events.nlargest(n_keep, "aco").copy()
+
+
 def bootstrap_state_outages(
     state_df: pd.DataFrame,
     county_draw_df: pd.DataFrame,
     outages_df: pd.DataFrame,
     random_state: int | None = None,
+    *,
+    event_pool: str = "all",
+    severe_top_pct: float = 0.10,
 ) -> pd.DataFrame:
     """
     For each state, bootstrap outage events n_s times using historical data.
@@ -181,6 +236,11 @@ def bootstrap_state_outages(
         Cleaned outage occurrence data with at least a 'state' column.
     random_state : int, optional
         Seed for reproducibility.
+    event_pool : str
+        'all' = full historical pool (normal scenario);
+        'severe_top10' = only top `severe_top_pct` ACO events per county/state pool.
+    severe_top_pct : float
+        Top fraction by ACO when event_pool='severe_top10' (default 0.10).
 
     Returns
     -------
@@ -198,6 +258,9 @@ def bootstrap_state_outages(
         )
     if "state" not in outages_df.columns:
         raise ValueError("outages_df must contain a 'state' column.")
+    event_pool = event_pool.lower().strip()
+    if event_pool not in ("all", "severe_top10"):
+        raise ValueError(f"event_pool must be 'all' or 'severe_top10', got {event_pool!r}")
 
     rng = np.random.default_rng(random_state)
     boot_list: list[pd.DataFrame] = []
@@ -205,9 +268,7 @@ def bootstrap_state_outages(
     # Precompute county FIPS strings in both tables
     county_draw_df = county_draw_df.copy()
     county_draw_df["fips_str"] = county_draw_df["fips"].astype(int).astype(str).str.zfill(5)
-    outages_df = outages_df.copy()
-    if "fips" in outages_df.columns:
-        outages_df["fips_str"] = outages_df["fips"].astype(int).astype(str).str.zfill(5)
+    outages_df = prepare_outages_for_bootstrap(outages_df)
 
     for _, row in state_df.iterrows():
         state = row["state"]
@@ -229,9 +290,17 @@ def bootstrap_state_outages(
         state_events = outages_df[outages_df["state"] == state]
         if state_events.empty:
             continue
+        if event_pool == "severe_top10":
+            state_events = filter_top_aco_pool(state_events, severe_top_pct)
 
         # Group outages by county for faster lookup
-        groups = dict(tuple(state_events.groupby("fips_str", observed=True)))
+        if event_pool == "severe_top10":
+            groups = {
+                k: filter_top_aco_pool(v, severe_top_pct)
+                for k, v in state_events.groupby("fips_str", observed=True)
+            }
+        else:
+            groups = dict(tuple(state_events.groupby("fips_str", observed=True)))
 
         sampled_rows: list[pd.DataFrame] = []
         for _ in range(n_events):
@@ -239,14 +308,20 @@ def bootstrap_state_outages(
             c_idx = rng.choice(len(county_ids), p=probs)
             c_fips = county_ids[c_idx]
 
-            # 2) pick historical outage from that county; if none, fall back to all state
-            county_events = groups.get(c_fips, state_events)
+            # 2) pick historical outage from that county; if none, fall back to state pool
+            if c_fips in groups and len(groups[c_fips]) > 0:
+                county_events = groups[c_fips]
+                used_fallback = False
+            else:
+                county_events = state_events
+                used_fallback = True
             if county_events.empty:
                 continue
             j = rng.integers(0, len(county_events))
             row_s = county_events.iloc[[j]].copy()
             row_s["sim_state"] = state
             row_s["sim_county_fips"] = c_fips
+            row_s["used_state_pool_fallback"] = used_fallback
             sampled_rows.append(row_s)
 
         if sampled_rows:

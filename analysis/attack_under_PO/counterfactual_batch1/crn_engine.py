@@ -224,6 +224,10 @@ def evaluate_events_on_graph(
 
         n_disrupted = len(_affected_nodes_in_radius(G, epicenter, radius_km))
         hit = int(1 if n_disrupted > 0 else 0)
+        # Miss: keep event, hit=0, ΔE/E=0 — do not skip / redraw
+        if hit == 0:
+            eff_loss = 0.0
+            pct_loss = 0.0
         lcc_deficit = max(0.0, 1.0 - float(lcc_frac))
         rel_loss_x_duration = float(pct_loss) * duration_h
         rel_lcc_loss_x_duration = lcc_deficit * duration_h
@@ -271,15 +275,16 @@ def aggregate_sim_metrics(event_df: pd.DataFrame) -> dict[str, Any]:
     total_lcc = float(event_df["rel_lcc_loss_x_duration"].sum())
     L_lcc = total_lcc / n_nodes if n_nodes > 0 else float("nan")
     n_ev = int(len(event_df))
-    if "hit" in event_df.columns:
-        n_hit = int(event_df["hit"].sum())
-    else:
-        n_zero = int((event_df["pct_eff_loss"] <= 0).sum())
-        n_hit = max(0, n_ev - n_zero)
+    n_hit = int(event_df["hit"].sum()) if "hit" in event_df.columns else 0
     n_zero = n_ev - n_hit
     p_hit = float(n_hit / n_ev) if n_ev > 0 else float("nan")
     L_event = total_rel / n_ev if n_ev > 0 else float("nan")
-    E_loss_hit = total_rel / n_hit if n_hit > 0 else float("nan")
+    if n_hit > 0 and "hit" in event_df.columns:
+        E_loss_hit = float(
+            event_df.loc[event_df["hit"] == 1, "rel_loss_x_duration"].sum() / n_hit
+        )
+    else:
+        E_loss_hit = float("nan")
     return {
         "sim_id": int(event_df["sim_id"].iloc[0]),
         "scenario": str(event_df["scenario"].iloc[0]),
@@ -543,7 +548,43 @@ def run_unit_batch1(
             row["delta_L_tilde"] = float("nan")
             row["delta_L_tilde_pct"] = float("nan")
 
+    # Collect densify metas for smoke (NEVI n_nevi + n_pop_fill)
+    densify_metas: dict[str, dict] = {}
+    for sc in active:
+        if sc.densify_pct is not None and sc.densify_mode:
+            _G, meta = load_or_build_densified(
+                G_base,
+                unit,
+                sc.densify_pct,
+                sc.densify_mode,
+                densify_cache,
+                seed=int(getattr(sc, "densify_seed", 42)),
+                replicate=getattr(sc, "densify_replicate", None),
+                member_state_abbrs=member_abbrs,
+            )
+            densify_metas[sc.key] = {
+                k: meta.get(k)
+                for k in (
+                    "mode",
+                    "pct",
+                    "n_target",
+                    "n_added",
+                    "n_nevi",
+                    "n_pop_fill",
+                    "n_base",
+                    "n_shortfall_before_fill",
+                    "intervention",
+                    "note",
+                    "replicate",
+                )
+                if k in meta or k in ("n_nevi", "n_pop_fill", "n_target", "n_added")
+            }
+
     pd.DataFrame(summary_rows).to_csv(summary_path, index=False)
+    if densify_metas:
+        (unit_out / "densify_meta.json").write_text(
+            json.dumps(densify_metas, indent=2), encoding="utf-8"
+        )
     manifest = {
         "unit": unit,
         "label": label,
@@ -551,10 +592,13 @@ def run_unit_batch1(
         "n_sims": n_sims,
         "outage_year": outage_year,
         "bootstrap_pool": bootstrap_pool,
+        "epicenter_mode": epicenter_mode,
+        "seed_rule": "seed = sim_id (0..n_sims-1); appendix must use same n_sims",
         "scenarios": [s.key for s in active],
         "skipped_scenarios": sorted(skip_keys),
         "pkl_path": str(pkl_path),
         "densify_cache": str(densify_cache),
+        "densify_meta_keys": sorted(densify_metas.keys()),
     }
     (unit_out / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     return f"ok:{unit}"

@@ -13,10 +13,14 @@ analysis/attack_under_PO/counterfactual_batch1/run_batch_ab_parallel.py
 analysis/attack_under_PO/counterfactual_batch1/build_5km_networks_2023.py
 analysis/attack_under_PO/counterfactual_batch1/build_cf_d_networks.py
 analysis/attack_under_PO/counterfactual_batch1/run_batch1_cluster.sh
+analysis/attack_under_PO/counterfactual_batch1/run_smoke_batch1.sh
+analysis/attack_under_PO/counterfactual_batch1/smoke_test_batch1.py
 analysis/attack_under_PO/counterfactual_batch1/run_batch_ab_cluster.sh
 analysis/attack_under_PO/counterfactual_batch1/analyze_dose_response.py
 analysis/attack_under_PO/counterfactual_batch1/README.md
 analysis/attack_under_PO/counterfactual_batch1/UPLOAD_LIST_BATCH1.txt
+analysis/attack_under_PO/build_pop_units_epicenter.py
+analysis/attack_under_PO/select_epicenter_by_population.py
 
 ## Existing deps (already on cluster if Bayesian MC ran)
 

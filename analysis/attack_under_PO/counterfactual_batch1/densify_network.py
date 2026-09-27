@@ -22,6 +22,7 @@ Cached pickles:
 
 from __future__ import annotations
 
+import json
 import pickle
 from pathlib import Path
 from typing import Any
@@ -731,7 +732,14 @@ def load_or_build_densified(
     if path.is_file() and not force:
         with open(path, "rb") as f:
             payload = pickle.load(f)
-        return payload["network"], payload.get("meta", {})
+        meta = payload.get("meta", {}) or {}
+        meta_path = path.with_suffix(".meta.json")
+        if meta and not meta_path.is_file():
+            try:
+                meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+            except Exception:
+                pass
+        return payload["network"], meta
 
     # For null replicates, fold replicate into seed
     use_seed = int(seed)
@@ -751,4 +759,10 @@ def load_or_build_densified(
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "wb") as f:
         pickle.dump({"network": H, "meta": meta}, f)
+    # Sidecar for smoke tests (n_nevi + n_pop_fill == n_target)
+    meta_path = path.with_suffix(".meta.json")
+    try:
+        meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    except Exception:
+        pass
     return H, meta

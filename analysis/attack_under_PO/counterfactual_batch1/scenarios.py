@@ -21,10 +21,12 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from counterfactual_batch1.densify_network import NULL_REPLICATES
+# Keep local to avoid importing densify_network (heavy) just to list scenarios.
+NULL_REPLICATES = 10
 
-# Shared intensity grid for dose-response (percent). Baseline = 0 is separate.
-DOSE_PCTS: tuple[int, ...] = (10, 20, 30, 50)
+# Shared intensity grid for dose-response (percent).
+# Dose 0 = no intervention (CF-D adds 0 nodes; CF-S radius_scale=1); must match baseline L under CRN.
+DOSE_PCTS: tuple[int, ...] = (0, 10, 20, 30, 50)
 
 
 @dataclass(frozen=True)
@@ -66,21 +68,27 @@ def batch1_scenarios() -> list[Scenario]:
     for pct in DOSE_PCTS:
         frac = pct / 100.0
         # --- main: NEVI corridor ---
+        # pct=0 → densify no-op (CRN smoke: L must equal baseline)
+        net_var = "base_10km" if pct == 0 else f"densify_nevi_p{pct}"
         out.append(
             Scenario(
                 key=f"CF-D_nevi_p{pct}",
                 family="CF-D",
-                densify_pct=frac,
-                densify_mode="nevi",
-                network_variant=f"densify_nevi_p{pct}",
+                densify_pct=frac if pct > 0 else None,
+                densify_mode="nevi" if pct > 0 else None,
+                network_variant=net_var,
                 dose_pct=float(pct),
                 description=(
                     f"NEVI corridor coverage: +{pct}% hypernodes every 50 mi on "
                     f"interstate, excluding sites <10 km from existing (main CF-D)"
+                    if pct > 0
+                    else "CF-D dose 0 (no nodes added; CRN lock vs baseline)"
                 ),
             )
         )
-        # --- demand-oriented ---
+        # --- demand-oriented / null / within: skip dose 0 (same as baseline) ---
+        if pct == 0:
+            continue
         out.append(
             Scenario(
                 key=f"CF-D_pop_p{pct}",

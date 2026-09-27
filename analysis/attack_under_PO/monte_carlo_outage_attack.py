@@ -373,12 +373,12 @@ def run_monte_carlo_for_state(
         if boot_state.empty:
             continue
 
-        # 4) Attack network per event
+        # 4) Attack network per event.
+        # Miss (no node in R_c) is a valid outcome: record hit=0, ΔE/E=0.
+        # Do NOT skip the event and do NOT redraw the epicenter.
         records = []
         event_ch: list[float] = []
         event_rel: list[float] = []
-        NEG_TOL_SMALL = 1e-8
-        NEG_TOL_LARGE = 1e-4
         for _, row in boot_state.iterrows():
             radius_km = float(row["impact_radius_km"])
             if "duration_hours" in row and pd.notna(row.get("duration_hours")):
@@ -388,57 +388,33 @@ def run_monte_carlo_for_state(
             else:
                 duration_h = 1.0
             fips_str = row["fips_str"]
-            poly = poly_dict.get(fips_str)
+            epicenter = (float(row["epicenter_lat"]), float(row["epicenter_lon"]))
 
-            pct_loss = None
-            eff_loss = None
-            eff_before = None
-            eff_after = None
-            lcc_frac_val = 1.0
+            cap_disrupted = 0.0
+            if capacity_weighted:
+                (
+                    eff_before,
+                    eff_after,
+                    eff_loss,
+                    pct_loss,
+                    _n_aff,
+                    cap_disrupted,
+                    lcc_frac_val,
+                ) = compute_event_loss_with_capacity(
+                    G, epicenter, radius_km, eff_before=E0
+                )
+            else:
+                (
+                    eff_before,
+                    eff_after,
+                    eff_loss,
+                    pct_loss,
+                    lcc_frac_val,
+                ) = compute_event_loss(
+                    G, epicenter, radius_km, eff_before=E0
+                )
 
-            max_tries = 3
-            for attempt in range(max_tries):
-                epicenter = (row["epicenter_lat"], row["epicenter_lon"])
-
-                cap_disrupted = 0.0
-                if capacity_weighted:
-                    (
-                        eff_before,
-                        eff_after,
-                        eff_loss,
-                        pct_loss,
-                        _n_aff,
-                        cap_disrupted,
-                        lcc_frac_val,
-                    ) = compute_event_loss_with_capacity(
-                        G, epicenter, radius_km, eff_before=E0
-                    )
-                else:
-                    (
-                        eff_before,
-                        eff_after,
-                        eff_loss,
-                        pct_loss,
-                        lcc_frac_val,
-                    ) = compute_event_loss(
-                        G, epicenter, radius_km, eff_before=E0
-                    )
-
-                if pct_loss is not None and pct_loss < -NEG_TOL_LARGE:
-                    # Large negative loss: warn and, if possible, resample epicenter within county
-                    print(
-                        f"[WARN] Large negative loss in MC (sim {sim_id}, fips {fips_str}, "
-                        f"attempt {attempt}, pct_loss={pct_loss:.3e}). Resampling epicenter."
-                    )
-                    if poly is not None:
-                        p_new = sample_point_in_polygon(poly, rng)
-                        row["epicenter_lat"] = p_new.y
-                        row["epicenter_lon"] = p_new.x
-                        continue
-                # Either loss is non-negative (good) or only mildly negative (treat as noise)
-                break
-
-            # After retries, clamp small negatives to zero so metrics不会变负
+            # Numerical noise only — never redraw epicenter on miss/zero loss
             if pct_loss is not None and pct_loss < 0:
                 eff_loss = 0.0
                 pct_loss = 0.0
@@ -452,10 +428,18 @@ def run_monte_carlo_for_state(
             lcc_deficit = max(0.0, 1.0 - float(lcc_frac_val))
             rel_lcc_loss_x_duration = lcc_deficit * duration_h
 
-            epicenter_final = (row["epicenter_lat"], row["epicenter_lon"])
+            epicenter_final = epicenter
             n_disrupted = len(
                 _affected_nodes_in_radius(G, epicenter_final, radius_km)
             )
+            hit = int(1 if n_disrupted > 0 else 0)
+            # Miss ⇒ hit=0 and ΔE/E=0 by construction (keep in P(hit) denom / L mean)
+            if hit == 0:
+                pct_loss = 0.0
+                eff_loss = 0.0
+                rel_loss_x_duration = 0.0
+                loss_x_duration = 0.0
+
             nd = float(row.get("Nd", row.get("affected_customers", 0.0)) or 0.0)
             customer_hours = nd * duration_h
             event_ch.append(customer_hours)
@@ -469,7 +453,7 @@ def run_monte_carlo_for_state(
                     "fips_str": str(fips_str).zfill(5),
                     "epicenter_lat": float(epicenter_final[0]),
                     "epicenter_lon": float(epicenter_final[1]),
-                    "hit": int(1 if n_disrupted > 0 else 0),
+                    "hit": hit,
                     "n_disrupted_nodes": int(n_disrupted),  # |S_i|
                     "eff_loss": eff_loss if eff_loss is not None else 0.0,
                     "pct_eff_loss": pct_loss if pct_loss is not None else 0.0,  # ΔE/E
@@ -534,13 +518,19 @@ def run_monte_carlo_for_state(
             L_severe = float(rel_arr[ch_arr >= p75].sum() / n_nodes)
 
         n_ev = int(df_events.shape[0])
-        n_zero = int((df_events["pct_eff_loss"] <= 0).sum())
-        n_hit = max(0, n_ev - n_zero)
+        # P(hit) uses hit flag (misses stay in the denominator); E[loss|hit] excludes them
+        n_hit = int(df_events["hit"].sum()) if "hit" in df_events.columns else 0
+        n_zero = n_ev - n_hit
         p_hit = float(n_hit / n_ev) if n_ev > 0 else float("nan")
-        # L_event = mean_i (ΔE/E · T_i) = P(hit) × E[loss | hit]
         total_rel = float(df_events["rel_loss_x_duration"].sum())
         L_event = total_rel / n_ev if n_ev > 0 else float("nan")
-        E_loss_hit = total_rel / n_hit if n_hit > 0 else float("nan")
+        # Only hit events enter the conditional mean (misses have loss 0 anyway)
+        if n_hit > 0 and "hit" in df_events.columns:
+            E_loss_hit = float(
+                df_events.loc[df_events["hit"] == 1, "rel_loss_x_duration"].sum() / n_hit
+            )
+        else:
+            E_loss_hit = float("nan")
 
         all_sim_metrics.append(
             {

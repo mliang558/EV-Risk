@@ -304,15 +304,22 @@ def run_unit_batch2(
             n_fb_sy = int((fl == "state_year").sum())
             n_fb_sp = int((fl == "state_pooled").sum())
 
-        ev = evaluate_events_on_graph(
+        # Compatible with older cluster crn_engine (no removal_cache/graph_id kwargs).
+        import inspect
+
+        kw = dict(
             events=events,
             G=G,
             E0=E0,
             scenario=scenario,
             urban_fips=urban_fips,
-            removal_cache=removal_cache,
-            graph_id=graph_id,
         )
+        sig = inspect.signature(evaluate_events_on_graph)
+        if "removal_cache" in sig.parameters:
+            kw["removal_cache"] = removal_cache
+        if "graph_id" in sig.parameters:
+            kw["graph_id"] = graph_id
+        ev = evaluate_events_on_graph(**kw)
         m = aggregate_sim_metrics(ev)
         metrics_rows.append(
             _metrics_row(

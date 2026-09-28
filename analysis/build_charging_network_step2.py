@@ -18,7 +18,8 @@ Output (default)
   outputs/network_graph_2026_step2/network_summary.csv
 
 Each pickle: {"network": G, "meta": {...}}
-  - node: lat, lon, location, capacity, n_stations (raw sites in cluster)
+  - node: lat, lon, location, n_l1, n_l2, n_dc, capacity, n_stations
+    capacity = sum over cluster of (5*n_l1 + 25*n_l2 + 300*n_dc) per station
   - edge: weight (= normalized distance), distance_m
 
 Usage:
@@ -42,6 +43,12 @@ from run_charging_network import STATES_ORDER, _to_epsg3857_meters
 
 CLUSTER_RADIUS_M = 200.0
 MIN_NODES = 3
+CAPACITY_WEIGHTS = (5.0, 25.0, 300.0)  # L1, L2, DC
+
+
+def hypernode_capacity(n_l1: float, n_l2: float, n_dc: float) -> float:
+    w1, w2, wd = CAPACITY_WEIGHTS
+    return w1 * n_l1 + w2 * n_l2 + wd * n_dc
 
 
 def load_step1_stations(path: Path) -> pd.DataFrame:
@@ -55,6 +62,16 @@ def load_step1_stations(path: Path) -> pd.DataFrame:
     df["lat"] = pd.to_numeric(df["lat"], errors="coerce")
     df["lon"] = pd.to_numeric(df["lon"], errors="coerce")
     df["capacity"] = pd.to_numeric(df["capacity"], errors="coerce").fillna(0)
+    for col in ("n_l1", "n_l2", "n_dc"):
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+        else:
+            df[col] = 0.0
+    # Reconcile capacity with EVSE counts when Step-1 columns are present.
+    cap_from_evse = df.apply(
+        lambda r: hypernode_capacity(r["n_l1"], r["n_l2"], r["n_dc"]), axis=1
+    )
+    df["capacity"] = cap_from_evse
     return df.dropna(subset=["lat", "lon", "state"])
 
 
@@ -62,13 +79,20 @@ def cluster_stations(
     coords_ll: np.ndarray,
     capacities: np.ndarray,
     radius_m: float = CLUSTER_RADIUS_M,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Greedy fixed-radius clustering in EPSG:3857 meters."""
+    n_l1: np.ndarray | None = None,
+    n_l2: np.ndarray | None = None,
+    n_dc: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Greedy fixed-radius clustering; sum n_l1, n_l2, n_dc (and capacity) per cluster."""
     coords_m = _to_epsg3857_meters(coords_ll[:, 0], coords_ll[:, 1])
     used = np.zeros(len(coords_m), dtype=bool)
     centers: list[np.ndarray] = []
     caps: list[float] = []
     counts: list[int] = []
+    l1s: list[float] = []
+    l2s: list[float] = []
+    dcs: list[float] = []
+    has_evse = n_l1 is not None and n_l2 is not None and n_dc is not None
 
     for i in range(len(coords_m)):
         if used[i]:
@@ -77,11 +101,53 @@ def cluster_stations(
         idx = (~used) & (dists <= radius_m)
         idx_indices = np.where(idx)[0]
         centers.append(coords_ll[idx_indices].mean(axis=0))
-        caps.append(float(capacities[idx_indices].sum()))
         counts.append(int(len(idx_indices)))
+        if has_evse:
+            s1 = float(n_l1[idx_indices].sum())
+            s2 = float(n_l2[idx_indices].sum())
+            sd = float(n_dc[idx_indices].sum())
+            l1s.append(s1)
+            l2s.append(s2)
+            dcs.append(sd)
+            caps.append(hypernode_capacity(s1, s2, sd))
+        else:
+            l1s.append(0.0)
+            l2s.append(0.0)
+            dcs.append(0.0)
+            caps.append(float(capacities[idx_indices].sum()))
         used[idx_indices] = True
 
-    return np.asarray(centers), np.asarray(caps, dtype=float), np.asarray(counts, dtype=int)
+    return (
+        np.asarray(centers),
+        np.asarray(caps, dtype=float),
+        np.asarray(counts, dtype=int),
+        np.asarray(l1s, dtype=float),
+        np.asarray(l2s, dtype=float),
+        np.asarray(dcs, dtype=float),
+    )
+
+
+def add_hypernode_to_graph(
+    G: nx.Graph,
+    node_id: int,
+    center: np.ndarray,
+    capacity: float,
+    n_stations: int,
+    n_l1: float,
+    n_l2: float,
+    n_dc: float,
+) -> None:
+    G.add_node(
+        node_id,
+        lat=float(center[0]),
+        lon=float(center[1]),
+        location=(float(center[0]), float(center[1])),
+        n_l1=float(n_l1),
+        n_l2=float(n_l2),
+        n_dc=float(n_dc),
+        capacity=float(capacity),
+        n_stations=int(n_stations),
+    )
 
 
 def voronoi_adjacency(coords_3857: np.ndarray) -> set[tuple[int, int]]:
@@ -115,9 +181,14 @@ def build_state_graph(
 
     coords_ll = sub[["lat", "lon"]].values.astype(np.float64)
     capacities = sub["capacity"].values.astype(np.float64)
+    n_l1 = sub["n_l1"].values.astype(np.float64)
+    n_l2 = sub["n_l2"].values.astype(np.float64)
+    n_dc = sub["n_dc"].values.astype(np.float64)
     n_raw = len(sub)
 
-    centers, cluster_caps, cluster_counts = cluster_stations(coords_ll, capacities, radius_m=radius_m)
+    centers, cluster_caps, cluster_counts, cl1, cl2, cdc = cluster_stations(
+        coords_ll, capacities, radius_m=radius_m, n_l1=n_l1, n_l2=n_l2, n_dc=n_dc
+    )
     n_nodes = len(centers)
     if n_nodes < MIN_NODES:
         return None, None
@@ -131,13 +202,15 @@ def build_state_graph(
 
     G = nx.Graph()
     for i in range(n_nodes):
-        G.add_node(
+        add_hypernode_to_graph(
+            G,
             i,
-            lat=float(centers[i, 0]),
-            lon=float(centers[i, 1]),
-            location=(float(centers[i, 0]), float(centers[i, 1])),
-            capacity=float(cluster_caps[i]),
-            n_stations=int(cluster_counts[i]),
+            centers[i],
+            float(cluster_caps[i]),
+            int(cluster_counts[i]),
+            float(cl1[i]),
+            float(cl2[i]),
+            float(cdc[i]),
         )
 
     for a, b in adj:
@@ -185,6 +258,8 @@ def build_all(
                 **stats,
                 "edge_weight": "normalized_distance",
                 "adjacency": "voronoi",
+                "node_features": "lat,lon,n_l1,n_l2,n_dc,capacity,n_stations",
+                "capacity_formula": "5*n_l1+25*n_l2+300*n_dc",
             },
         }
         pkl_path = net_dir / f"network_{state}.pkl"

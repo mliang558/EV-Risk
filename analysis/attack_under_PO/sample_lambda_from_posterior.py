@@ -22,9 +22,14 @@ import numpy as np
 import pandas as pd
 
 
-def load_posterior() -> tuple[pd.DataFrame, np.ndarray]:
+_POSTERIOR_CACHE: tuple[pd.DataFrame, np.ndarray] | None = None
+
+
+def load_posterior(*, force_reload: bool = False) -> tuple[pd.DataFrame, np.ndarray]:
     """
     Load county-level λ posterior samples from ADVI results.
+
+    Cached per process so ProcessPool workers only hit disk once.
 
     Returns
     -------
@@ -33,6 +38,10 @@ def load_posterior() -> tuple[pd.DataFrame, np.ndarray]:
     flat_lam : np.ndarray of shape (n_samples, n_counties)
         Flattened posterior samples of lambda_county across chains and draws.
     """
+    global _POSTERIOR_CACHE
+    if _POSTERIOR_CACHE is not None and not force_reload:
+        return _POSTERIOR_CACHE
+
     script_path = Path(__file__).resolve()
     project_root = script_path.parents[2]  # .../Pro_directory
 
@@ -49,16 +58,21 @@ def load_posterior() -> tuple[pd.DataFrame, np.ndarray]:
     if "fips" not in county_df.columns:
         raise ValueError("county_estimates_advi.csv must contain a 'fips' column.")
 
-    print(f"Loading posterior from: {posterior_path}")
+    print(f"Loading posterior from: {posterior_path}", flush=True)
     idata = az.from_netcdf(posterior_path)
 
     lam = idata.posterior["lambda_county"].values  # (chains, draws, n_counties)
     flat_lam = lam.reshape(-1, lam.shape[-1])  # (n_samples, n_counties)
 
-    print(f"Posterior shape: chains={lam.shape[0]}, draws={lam.shape[1]}, counties={lam.shape[2]}")
-    print(f"Flattened samples: {flat_lam.shape[0]} x {flat_lam.shape[1]}")
+    print(
+        f"Posterior shape: chains={lam.shape[0]}, draws={lam.shape[1]}, "
+        f"counties={lam.shape[2]}",
+        flush=True,
+    )
+    print(f"Flattened samples: {flat_lam.shape[0]} x {flat_lam.shape[1]}", flush=True)
 
-    return county_df, flat_lam
+    _POSTERIOR_CACHE = (county_df, flat_lam)
+    return _POSTERIOR_CACHE
 
 
 def load_county_estimates() -> pd.DataFrame:

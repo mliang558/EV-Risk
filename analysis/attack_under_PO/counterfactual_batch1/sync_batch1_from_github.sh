@@ -19,6 +19,9 @@ echo "[sync] ROOT=$ROOT  REF=$REF"
 
 FILES=(
   analysis/build_10km_panel_2018_2026.py
+  analysis/build_charging_network_step2.py
+  analysis/prepare_stations.py
+  analysis/run_charging_network.py
   analysis/attack_under_PO/attack_with_bootstrapped_outages.py
   analysis/attack_under_PO/counterfactual_batch1/crn_engine.py
   analysis/attack_under_PO/counterfactual_batch1/run_batch1_cluster.sh

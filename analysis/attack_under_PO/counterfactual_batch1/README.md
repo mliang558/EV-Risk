@@ -94,16 +94,25 @@ python analysis/attack_under_PO/counterfactual_batch1/smoke_compare_removal_cach
 # Expect: PASS … metric rows identical (cache ON == OFF)
 # Optional CA memory peek: same script --unit CA (watch RSS / removal_cache_entries in manifest)
 
-# Clear interrupted partials before full run:
-#   rm -rf results_cf_batch1_2023_pooled/<UNIT>   # or pkill + wipe OUT
+# Clear interrupted partials before full run (must match OUT below):
+#   pkill -f run_batch1 || true
+#   rm -rf "$PWD/results_cf_batch1_2023_pooled" "$PWD/results_cf_batch1_cache_compare"
 
 # --- 2) FULL (only after smoke + cache-compare PASS) ---
-# Prefer largest-|V| first; WORKERS≈45 when nproc/cpu.max allows
-N_SIMS=100 WORKERS=45 NO_EVENTS=1 FAMILIES=baseline,CF-D,CF-S,U,K \
-  bash analysis/attack_under_PO/counterfactual_batch1/run_batch1_cluster.sh
+# Use tmux/nohup — long wall time; SSH drop must not kill the job.
+# Threads: one BLAS thread per worker process (45 workers × multi-thread = thrash).
+tmux new -s cf1   # or: tmux attach -t cf1
+# inside tmux:
+cd /opt/data_repo/mliang_work/Pro_directory   # your cluster root
+export PYTHONPATH="$PWD/analysis:$PWD/analysis/attack_under_PO"
+export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1
+export MPLCONFIGDIR=$PWD/.mplconfig XDG_CACHE_HOME=$PWD/.cache
 
-# If wall time too long (see smoke time estimate): drop K+U first
-#   N_SIMS=100 WORKERS=45 NO_EVENTS=1 FAMILIES=baseline,CF-D,CF-S bash .../run_batch1_cluster.sh
+N_SIMS=100 WORKERS=45 NO_EVENTS=1 \
+  OUT=$PWD/results_cf_batch1_2023_pooled \
+  FAMILIES=baseline,CF-D,CF-S,U,K \
+  bash analysis/attack_under_PO/counterfactual_batch1/run_batch1_cluster.sh \
+  2>&1 | tee cf1.log
 
 # --- 3) Appendix: old station epicenter, SAME seeds (same N_SIMS) ---
 OUT=results_cf_batch1_2023_pooled_epicenter_station EPICENTER_MODE=station \

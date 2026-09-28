@@ -50,6 +50,23 @@ def _default_workers() -> int:
     return max(1, min(12, n - 2))
 
 
+def _git_rev() -> str:
+    try:
+        import subprocess
+
+        return (
+            subprocess.check_output(
+                ["git", "rev-parse", "HEAD"],
+                cwd=str(ROOT),
+                stderr=subprocess.DEVNULL,
+                text=True,
+            )
+            .strip()
+        )
+    except Exception:
+        return "unknown"
+
+
 def members_abbr_to_full_names(members: str) -> list[str]:
     names: list[str] = []
     for abbr in members.split(","):
@@ -249,6 +266,14 @@ def main() -> None:
         "scenarios": [s.key for s in sc],
         "network_root": str(network_root),
         "out": str(out_root),
+        "git_commit": _git_rev(),
+        "no_events": bool(args.no_events),
+        "metrics_include_P_hit": True,
+        "note_no_events": (
+            "Event gz optional; metrics_*.csv still has n_events, n_hit_events, "
+            "P_hit, L_event, E_loss_given_hit, total_rel_loss_x_duration, "
+            "total_rel_loss_x_duration_hit for §4.3."
+        ),
     }
     (out_root / "batch_manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
 

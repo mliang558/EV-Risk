@@ -393,13 +393,14 @@ def run_monte_carlo_for_state(
             epicenter = (float(row["epicenter_lat"]), float(row["epicenter_lon"]))
 
             cap_disrupted = 0.0
+            affected: list = []
             if capacity_weighted:
                 (
                     eff_before,
                     eff_after,
                     eff_loss,
                     pct_loss,
-                    _n_aff,
+                    n_disrupted,
                     cap_disrupted,
                     lcc_frac_val,
                 ) = compute_event_loss_with_capacity(
@@ -412,9 +413,11 @@ def run_monte_carlo_for_state(
                     eff_loss,
                     pct_loss,
                     lcc_frac_val,
+                    affected,
                 ) = compute_event_loss(
                     G, epicenter, radius_km, eff_before=E0
                 )
+                n_disrupted = len(affected)
 
             # Numerical noise only — never redraw epicenter on miss/zero loss
             if pct_loss is not None and pct_loss < 0:
@@ -431,9 +434,6 @@ def run_monte_carlo_for_state(
             rel_lcc_loss_x_duration = lcc_deficit * duration_h
 
             epicenter_final = epicenter
-            n_disrupted = len(
-                _affected_nodes_in_radius(G, epicenter_final, radius_km)
-            )
             hit = int(1 if n_disrupted > 0 else 0)
             # Miss ⇒ hit=0 and ΔE/E=0 by construction (keep in P(hit) denom / L mean)
             if hit == 0:

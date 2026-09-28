@@ -29,7 +29,10 @@ WORKERS="${WORKERS:-$NPROC_ALL}"
 FAMILIES="${FAMILIES:-baseline,CF-D,CF-S,U}"
 ONLY="${ONLY:-}"
 EPICENTER_MODE="${EPICENTER_MODE:-population}"
-# Full panel: skip per-event gz (huge I/O). Smoke should set NO_EVENTS=0.
+# Full panel: skip per-event gz (huge I/O). Safe for §4.3:
+# metrics_*.csv still stores n_events, n_hit_events, P_hit, L_event,
+# E_loss_given_hit, total_rel_loss_x_duration, total_rel_loss_x_duration_hit.
+# Smoke with event checks: NO_EVENTS=0
 NO_EVENTS="${NO_EVENTS:-1}"
 
 mkdir -p "$OUT" "$DENSIFY_CACHE"

@@ -65,7 +65,7 @@ def load_network(data_path: Path) -> nx.Graph:
 
 
 _DEBUG_COUNTER = 0
-_DEBUG_MAX_PRINT = 10
+_DEBUG_MAX_PRINT = 0  # set >0 only for local debug (prints slow full runs)
 # 正式分析：不放大半径，直接用物理半径
 _DEBUG_RADIUS_FACTOR = 1.0
 
@@ -112,22 +112,18 @@ def compute_event_loss(
     epicenter: Tuple[float, float],
     radius_km: float,
     eff_before: float | None = None,
-) -> Tuple[float, float, float, float, float]:
+    removal_cache: dict | None = None,
+) -> Tuple[float, float, float, float, float, list]:
     """
     Compute efficiency loss for a single outage event.
 
-    Parameters
-    ----------
-    G : nx.Graph
-    epicenter : (lat, lon)
-    radius_km : float
-    eff_before : float, optional
-        Precomputed baseline efficiency E(G). If None, it will be computed.
-
     Returns
     -------
-    eff_before, eff_after, eff_loss, pct_loss, lcc_frac
-        lcc_frac = |LCC(G\\S)| / |V| (1.0 if no nodes removed).
+    eff_before, eff_after, eff_loss, pct_loss, lcc_frac, affected_nodes
+        On miss (affected empty): eff_after=eff_before, losses 0, lcc_frac=1 —
+        does NOT recompute global_efficiency.
+        removal_cache: optional dict frozenset(S) -> (eff_after, lcc_frac)
+        shared across events/scenarios on the same graph G.
     """
     n_vertices = G.number_of_nodes()
     if eff_before is None:
@@ -135,9 +131,7 @@ def compute_event_loss(
 
     global _DEBUG_COUNTER
 
-    # 放大半径做调试（正式分析时将 _DEBUG_RADIUS_FACTOR 设为 1.0）
     eff_radius_km = radius_km * _DEBUG_RADIUS_FACTOR
-
     affected = _affected_nodes_in_radius(G, epicenter, eff_radius_km)
 
     if _DEBUG_COUNTER < _DEBUG_MAX_PRINT:
@@ -148,21 +142,26 @@ def compute_event_loss(
         _DEBUG_COUNTER += 1
 
     if not affected:
-        return eff_before, eff_before, 0.0, 0.0, 1.0
+        # Miss: E(G\\S)=E(G); skip efficiency (dominant cost)
+        return eff_before, eff_before, 0.0, 0.0, 1.0, []
 
-    # Remove affected nodes for this event
-    G_temp = G.copy()
-    G_temp.remove_nodes_from(affected)
-
-    if G_temp.number_of_nodes() == 0:
-        eff_after = 0.0
+    key = frozenset(affected)
+    if removal_cache is not None and key in removal_cache:
+        eff_after, lcc_frac_val = removal_cache[key]
     else:
-        eff_after = nx.global_efficiency(G_temp)
+        G_temp = G.copy()
+        G_temp.remove_nodes_from(affected)
+        if G_temp.number_of_nodes() == 0:
+            eff_after = 0.0
+        else:
+            eff_after = nx.global_efficiency(G_temp)
+        lcc_frac_val = lcc_fraction(G_temp, n_vertices)
+        if removal_cache is not None:
+            removal_cache[key] = (float(eff_after), float(lcc_frac_val))
 
     eff_loss = eff_before - eff_after
     pct_loss = eff_loss / eff_before if eff_before > 0 else 0.0
-    lcc_frac_val = lcc_fraction(G_temp, n_vertices)
-    return eff_before, eff_after, eff_loss, pct_loss, lcc_frac_val
+    return eff_before, eff_after, eff_loss, pct_loss, lcc_frac_val, affected
 
 
 def compute_event_loss_with_capacity(
@@ -287,7 +286,7 @@ def main() -> None:
         radius_km = float(row["impact_radius_km"])
         duration_h = float(row["duration_hours"])
 
-        eff_before, eff_after, eff_loss, pct_loss, lcc_frac_val = compute_event_loss(
+        eff_before, eff_after, eff_loss, pct_loss, lcc_frac_val, _aff = compute_event_loss(
             G, epicenter, radius_km
         )
         lcc_deficit = 1.0 - lcc_frac_val

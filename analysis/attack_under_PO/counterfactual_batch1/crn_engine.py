@@ -205,26 +205,37 @@ def evaluate_events_on_graph(
     E0: float,
     scenario: Scenario,
     urban_fips: set[str],
+    removal_cache: dict | None = None,
 ) -> pd.DataFrame:
     """Apply one scenario to a shared CRN event table; return event-level rows."""
     n_nodes = G.number_of_nodes()
     records: list[dict] = []
+    # Cache E(G\\S) by removed-node set — reuse across CF-S doses / U on same G
+    if removal_cache is None:
+        removal_cache = {}
 
     for _, row in events.iterrows():
         radius_km = _effective_radius(row, scenario, urban_fips)
         duration_h = float(row["duration_hours"]) * float(scenario.duration_scale)
         epicenter = (float(row["epicenter_lat"]), float(row["epicenter_lon"]))
 
-        eff_before, eff_after, eff_loss, pct_loss, lcc_frac = compute_event_loss(
-            G, epicenter, radius_km, eff_before=E0
+        (
+            eff_before,
+            eff_after,
+            eff_loss,
+            pct_loss,
+            lcc_frac,
+            affected,
+        ) = compute_event_loss(
+            G, epicenter, radius_km, eff_before=E0, removal_cache=removal_cache
         )
         if pct_loss is not None and pct_loss < 0:
             eff_loss = 0.0
             pct_loss = 0.0
 
-        n_disrupted = len(_affected_nodes_in_radius(G, epicenter, radius_km))
+        n_disrupted = len(affected)
         hit = int(1 if n_disrupted > 0 else 0)
-        # Miss: keep event, hit=0, ΔE/E=0 — do not skip / redraw
+        # Miss: keep event, hit=0, ΔE/E=0 (already skipped efficiency in compute_event_loss)
         if hit == 0:
             eff_loss = 0.0
             pct_loss = 0.0
@@ -280,10 +291,12 @@ def aggregate_sim_metrics(event_df: pd.DataFrame) -> dict[str, Any]:
     p_hit = float(n_hit / n_ev) if n_ev > 0 else float("nan")
     L_event = total_rel / n_ev if n_ev > 0 else float("nan")
     if n_hit > 0 and "hit" in event_df.columns:
-        E_loss_hit = float(
-            event_df.loc[event_df["hit"] == 1, "rel_loss_x_duration"].sum() / n_hit
+        total_rel_hit = float(
+            event_df.loc[event_df["hit"] == 1, "rel_loss_x_duration"].sum()
         )
+        E_loss_hit = total_rel_hit / n_hit
     else:
+        total_rel_hit = 0.0
         E_loss_hit = float("nan")
     return {
         "sim_id": int(event_df["sim_id"].iloc[0]),
@@ -294,7 +307,8 @@ def aggregate_sim_metrics(event_df: pd.DataFrame) -> dict[str, Any]:
         "baseline_efficiency": float(event_df["baseline_efficiency"].iloc[0]),
         "L_tilde": L_tilde,
         "L_lcc_tilde": L_lcc,
-        "total_rel_loss_x_duration": total_rel,
+        "total_rel_loss_x_duration": total_rel,  # sum_i (ΔE/E · T_i)
+        "total_rel_loss_x_duration_hit": total_rel_hit,  # sum only over hit
         "mean_pct_eff_loss": float(event_df["pct_eff_loss"].mean()),
         "mean_lcc_frac": float(event_df["lcc_frac"].mean()),
         "n_disrupted_nodes_mean": float(event_df["n_disrupted_nodes"].mean()),
@@ -343,6 +357,23 @@ def resolve_graph_for_scenario(
         )
         return H, scenario.network_variant
     return G_base, scenario.network_variant
+
+
+def _git_commit(project_root: Path) -> str:
+    try:
+        import subprocess
+
+        return (
+            subprocess.check_output(
+                ["git", "rev-parse", "HEAD"],
+                cwd=str(project_root),
+                stderr=subprocess.DEVNULL,
+                text=True,
+            )
+            .strip()
+        )
+    except Exception:
+        return "unknown"
 
 
 def run_unit_batch1(
@@ -435,6 +466,8 @@ def run_unit_batch1(
     crn_rows: list[pd.DataFrame] = []
     metrics_by_sc: dict[str, list[dict]] = {s.key: [] for s in active}
     events_by_sc: dict[str, list[pd.DataFrame]] = {s.key: [] for s in active}
+    # Per graph-variant removal cache (shared across sims + CF-S/U on same G)
+    removal_caches: dict[str, dict] = {}
 
     t0 = time.time()
     for sim_id in range(n_sims):
@@ -484,12 +517,14 @@ def run_unit_batch1(
             )
             assert G_sc is not None
             G_use, E0 = graph_cache[note]
+            cache = removal_caches.setdefault(note, {})
             ev = evaluate_events_on_graph(
                 events=events,
                 G=G_use,
                 E0=E0,
                 scenario=sc,
                 urban_fips=urban_fips,
+                removal_cache=cache,
             )
             if write_events:
                 events_by_sc[sc.key].append(ev)
@@ -599,6 +634,10 @@ def run_unit_batch1(
         "pkl_path": str(pkl_path),
         "densify_cache": str(densify_cache),
         "densify_meta_keys": sorted(densify_metas.keys()),
+        "git_commit": _git_commit(project_root),
+        "write_events": bool(write_events),
+        "removal_cache_variants": sorted(removal_caches.keys()),
+        "removal_cache_sizes": {k: len(v) for k, v in removal_caches.items()},
     }
     (unit_out / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     return f"ok:{unit}"

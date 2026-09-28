@@ -1,0 +1,37 @@
+{
+  "unit": "IL",
+  "label": "IL",
+  "member_states": [
+    "Illinois"
+  ],
+  "n_sims": 100,
+  "outage_year": null,
+  "bootstrap_pool": "all",
+  "epicenter_mode": "population",
+  "seed_rule": "seed = sim_id (0..n_sims-1); appendix must use same n_sims",
+  "scenarios": [
+    "baseline",
+    "CF-D_nevi_p0",
+    "CF-D_nevi_p10",
+    "CF-D_nevi_p20",
+    "CF-D_nevi_p30",
+    "CF-D_nevi_p50",
+    "CF-S_m0",
+    "CF-S_m10",
+    "CF-S_m20",
+    "CF-S_m30",
+    "CF-S_m50",
+    "U_x1p5",
+    "U_x2",
+    "K_5km"
+  ],
+  "skipped_scenarios": [],
+  "pkl_path": "/opt/data_repo/mliang_work/attack_under_PO/outputs/network_graph_10km_2018_2026/2023/network_structures/network_IL.pkl",
+  "densify_cache": "/opt/data_repo/mliang_work/Pro_directory/outputs/network_graph_cf_densify_2023",
+  "densify_meta_keys": [
+    "CF-D_nevi_p10",
+    "CF-D_nevi_p20",
+    "CF-D_nevi_p30",
+    "CF-D_nevi_p50"
+  ]
+}

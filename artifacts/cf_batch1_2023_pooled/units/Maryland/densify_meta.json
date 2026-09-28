@@ -1,0 +1,50 @@
+{
+  "CF-D_nevi_p10": {
+    "mode": "nevi",
+    "pct": 0.1,
+    "n_target": 16,
+    "n_added": 16,
+    "n_nevi": 16,
+    "n_pop_fill": 0,
+    "n_base": 160,
+    "n_shortfall_before_fill": 0,
+    "intervention": "coverage_expansion_nevi",
+    "note": "NEVI-style: points every 50 mi on interstate corridors; exclude <10 km from existing hypernodes; dose = ceil(pct*|V|). If corridor candidates are exhausted, remaining slots use population-weighted placement."
+  },
+  "CF-D_nevi_p20": {
+    "mode": "nevi",
+    "pct": 0.2,
+    "n_target": 32,
+    "n_added": 32,
+    "n_nevi": 32,
+    "n_pop_fill": 0,
+    "n_base": 160,
+    "n_shortfall_before_fill": 0,
+    "intervention": "coverage_expansion_nevi",
+    "note": "NEVI-style: points every 50 mi on interstate corridors; exclude <10 km from existing hypernodes; dose = ceil(pct*|V|). If corridor candidates are exhausted, remaining slots use population-weighted placement."
+  },
+  "CF-D_nevi_p30": {
+    "mode": "nevi",
+    "pct": 0.3,
+    "n_target": 48,
+    "n_added": 48,
+    "n_nevi": 48,
+    "n_pop_fill": 0,
+    "n_base": 160,
+    "n_shortfall_before_fill": 0,
+    "intervention": "coverage_expansion_nevi",
+    "note": "NEVI-style: points every 50 mi on interstate corridors; exclude <10 km from existing hypernodes; dose = ceil(pct*|V|). If corridor candidates are exhausted, remaining slots use population-weighted placement."
+  },
+  "CF-D_nevi_p50": {
+    "mode": "nevi",
+    "pct": 0.5,
+    "n_target": 80,
+    "n_added": 80,
+    "n_nevi": 80,
+    "n_pop_fill": 0,
+    "n_base": 160,
+    "n_shortfall_before_fill": 0,
+    "intervention": "coverage_expansion_nevi",
+    "note": "NEVI-style: points every 50 mi on interstate corridors; exclude <10 km from existing hypernodes; dose = ceil(pct*|V|). If corridor candidates are exhausted, remaining slots use population-weighted placement."
+  }
+}

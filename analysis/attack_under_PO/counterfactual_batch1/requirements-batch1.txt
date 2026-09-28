@@ -1,0 +1,34 @@
+# Counterfactual Batch 1 (+ baseline MC epicenter / densify) — Python deps
+# Install (cluster venv):
+#   pip install -r analysis/attack_under_PO/counterfactual_batch1/requirements-batch1.txt
+#
+# Python: 3.10–3.11 recommended (tested pattern on cluster Jupyter images).
+# If geopandas wheels fail, try: conda install -c conda-forge geopandas
+
+# Core
+numpy>=1.23,<3
+pandas>=1.5
+scipy>=1.9
+networkx>=3.0
+
+# Geospatial (required for epicenters, county polygons, NEVI corridors)
+geopandas>=0.13
+shapely>=2.0
+pyproj>=3.4
+fiona>=1.9
+# optional but helpful for spatial joins
+rtree>=1.0
+
+# Posterior / ADVI draws
+xarray>=2023.1
+netCDF4>=1.6
+
+# I/O
+pyarrow>=12.0
+
+# Plots (dose-response / smoke figures)
+matplotlib>=3.6
+
+# Census tract download (build_pop_units_epicenter.py) — stdlib urllib is enough;
+# optional convenience:
+# requests>=2.28

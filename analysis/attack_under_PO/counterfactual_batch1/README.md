@@ -4,7 +4,29 @@
 
 **Reuses** existing 2023 10 km hypernode pickles under `outputs/network_graph_10km_2018_2026/2023/`.
 
-## Prerequisites (must before any run)
+## Environment (install first on cluster)
+
+```bash
+# From Pro_directory root, with your venv activated:
+pip install -r analysis/attack_under_PO/counterfactual_batch1/requirements-batch1.txt
+
+# If geopandas fails on pip wheels:
+#   conda install -c conda-forge geopandas shapely pyproj fiona rtree
+
+# Quick import check
+python -c "import geopandas, networkx, xarray, netCDF4, shapely; print('ok')"
+```
+
+Main packages: `numpy`, `pandas`, `scipy`, `networkx`, `geopandas` (+ `shapely`/`pyproj`/`fiona`), `xarray`, `netCDF4`, `matplotlib`, `pyarrow`.
+
+Also set:
+
+```bash
+export PYTHONPATH="$PWD/analysis:$PWD/analysis/attack_under_PO:$PYTHONPATH"
+# Shell scripts from Windows may need: sed -i 's/\r$//' analysis/attack_under_PO/counterfactual_batch1/*.sh
+```
+
+## Prerequisites (data; must before any run)
 
 ```bash
 # Census-tract population units for network-independent epicenters (NO station-KDE)
@@ -35,18 +57,19 @@ python analysis/attack_under_PO/build_pop_units_epicenter.py
 export PYTHONPATH="$PWD/analysis:$PWD/analysis/attack_under_PO"
 export CENSUS_API_KEY=...   # if building pop units on cluster
 
-# --- 0) Tract epicenters once ---
+# --- 0) Env + tract epicenters once ---
+pip install -r analysis/attack_under_PO/counterfactual_batch1/requirements-batch1.txt
 python analysis/attack_under_PO/build_pop_units_epicenter.py
 
 # --- 1) SMOKE (TX + VT + auto checks). Must pass before N_SIMS=100 ---
 bash analysis/attack_under_PO/counterfactual_batch1/run_smoke_batch1.sh
-# Or stepwise:
-#   FORCE=1 ONLY=TX N_SIMS=2 WORKERS=1 OUT=results_cf_batch1_smoke \
-#     FAMILIES=baseline,CF-D,CF-S,U,K \
+# Or stepwise (absolute OUT if layout is nonstandard):
+#   FORCE=1 ONLY=TX N_SIMS=2 WORKERS=1 \
+#     OUT=$PWD/results_cf_batch1_smoke FAMILIES=baseline,CF-D,CF-S,U,K \
 #     bash analysis/attack_under_PO/counterfactual_batch1/run_batch1_cluster.sh
 #   python analysis/attack_under_PO/counterfactual_batch1/smoke_test_batch1.py \
 #     --batch-dir results_cf_batch1_smoke --unit TX --estimate-full --smoke-seconds <SEC>
-#   FORCE=1 ONLY=VT N_SIMS=2 WORKERS=1 OUT=results_cf_batch1_smoke \
+#   FORCE=1 ONLY=VT N_SIMS=2 WORKERS=1 OUT=$PWD/results_cf_batch1_smoke \
 #     FAMILIES=baseline,CF-D,CF-S,U,K \
 #     bash analysis/attack_under_PO/counterfactual_batch1/run_batch1_cluster.sh
 #   python .../smoke_test_batch1.py --batch-dir results_cf_batch1_smoke --unit VT --expect-fallback

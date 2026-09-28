@@ -206,13 +206,27 @@ def evaluate_events_on_graph(
     scenario: Scenario,
     urban_fips: set[str],
     removal_cache: dict | None = None,
+    graph_id: str | None = None,
 ) -> pd.DataFrame:
     """Apply one scenario to a shared CRN event table; return event-level rows."""
+    import os
+    from collections import OrderedDict
+
     n_nodes = G.number_of_nodes()
     records: list[dict] = []
-    # Cache E(G\\S) by removed-node set — reuse across CF-S doses / U on same G
-    if removal_cache is None:
-        removal_cache = {}
+    # Keys are (graph_id, frozenset(S)) — CF-D dose graphs never collide.
+    # Disable: CF_B1_REMOVAL_CACHE=0. LRU size: CF_B1_REMOVAL_CACHE_MAX (default 50000).
+    use_cache = os.environ.get("CF_B1_REMOVAL_CACHE", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+    )
+    if not use_cache:
+        removal_cache = None
+    elif removal_cache is None:
+        removal_cache = OrderedDict()
+    cache_max = int(os.environ.get("CF_B1_REMOVAL_CACHE_MAX", "50000"))
+    gid = graph_id or scenario.network_variant or scenario.key
 
     for _, row in events.iterrows():
         radius_km = _effective_radius(row, scenario, urban_fips)
@@ -227,7 +241,13 @@ def evaluate_events_on_graph(
             lcc_frac,
             affected,
         ) = compute_event_loss(
-            G, epicenter, radius_km, eff_before=E0, removal_cache=removal_cache
+            G,
+            epicenter,
+            radius_km,
+            eff_before=E0,
+            removal_cache=removal_cache,
+            graph_id=gid,
+            removal_cache_max=cache_max,
         )
         if pct_loss is not None and pct_loss < 0:
             eff_loss = 0.0
@@ -235,7 +255,6 @@ def evaluate_events_on_graph(
 
         n_disrupted = len(affected)
         hit = int(1 if n_disrupted > 0 else 0)
-        # Miss: keep event, hit=0, ΔE/E=0 (already skipped efficiency in compute_event_loss)
         if hit == 0:
             eff_loss = 0.0
             pct_loss = 0.0
@@ -256,12 +275,12 @@ def evaluate_events_on_graph(
                 "epicenter_lat": epicenter[0],
                 "epicenter_lon": epicenter[1],
                 "hit": hit,
-                "n_disrupted_nodes": int(n_disrupted),  # |S_i|
+                "n_disrupted_nodes": int(n_disrupted),
                 "radius_base_km": float(row["radius_base_km"]),
                 "radius_km": float(radius_km),
-                "duration_hours": float(duration_h),  # T_i
+                "duration_hours": float(duration_h),
                 "duration_base_hours": float(row["duration_hours"]),
-                "pct_eff_loss": float(pct_loss),  # ΔE/E
+                "pct_eff_loss": float(pct_loss),
                 "eff_loss": float(eff_loss),
                 "rel_loss_x_duration": float(rel_loss_x_duration),
                 "rel_lcc_loss_x_duration": float(rel_lcc_loss_x_duration),
@@ -466,8 +485,10 @@ def run_unit_batch1(
     crn_rows: list[pd.DataFrame] = []
     metrics_by_sc: dict[str, list[dict]] = {s.key: [] for s in active}
     events_by_sc: dict[str, list[pd.DataFrame]] = {s.key: [] for s in active}
-    # Per graph-variant removal cache (shared across sims + CF-S/U on same G)
-    removal_caches: dict[str, dict] = {}
+    # Shared removal cache for the unit; keys include graph_id (network variant).
+    from collections import OrderedDict
+
+    removal_cache: OrderedDict = OrderedDict()
 
     t0 = time.time()
     for sim_id in range(n_sims):
@@ -517,14 +538,14 @@ def run_unit_batch1(
             )
             assert G_sc is not None
             G_use, E0 = graph_cache[note]
-            cache = removal_caches.setdefault(note, {})
             ev = evaluate_events_on_graph(
                 events=events,
                 G=G_use,
                 E0=E0,
                 scenario=sc,
                 urban_fips=urban_fips,
-                removal_cache=cache,
+                removal_cache=removal_cache,
+                graph_id=note,
             )
             if write_events:
                 events_by_sc[sc.key].append(ev)
@@ -636,8 +657,7 @@ def run_unit_batch1(
         "densify_meta_keys": sorted(densify_metas.keys()),
         "git_commit": _git_commit(project_root),
         "write_events": bool(write_events),
-        "removal_cache_variants": sorted(removal_caches.keys()),
-        "removal_cache_sizes": {k: len(v) for k, v in removal_caches.items()},
+        "removal_cache_entries": int(len(removal_cache)),
     }
     (unit_out / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     return f"ok:{unit}"

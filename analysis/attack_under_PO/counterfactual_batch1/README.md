@@ -86,12 +86,24 @@ bash analysis/attack_under_PO/counterfactual_batch1/run_smoke_batch1.sh
 #   (5) NEVI meta n_nevi + n_pop_fill = n_added
 # VT catches fallback + NEVI shortfall; also checks MD/DE/DC, CT/RI, Dakotas tracts.
 
-# --- 2) FULL (only after smoke PASS) ---
-N_SIMS=100 WORKERS=12 FAMILIES=baseline,CF-D,CF-S,U,K \
+# --- 1b) Removal-cache correctness (VT, ~minutes) ---
+# Keys are (graph_id, frozenset(S)); LRU via CF_B1_REMOVAL_CACHE_MAX (default 50000).
+# Disable cache: CF_B1_REMOVAL_CACHE=0
+python analysis/attack_under_PO/counterfactual_batch1/smoke_compare_removal_cache.py \
+  --unit VT --n-sims 2
+# Expect: PASS … metric rows identical (cache ON == OFF)
+# Optional CA memory peek: same script --unit CA (watch RSS / removal_cache_entries in manifest)
+
+# Clear interrupted partials before full run:
+#   rm -rf results_cf_batch1_2023_pooled/<UNIT>   # or pkill + wipe OUT
+
+# --- 2) FULL (only after smoke + cache-compare PASS) ---
+# Prefer largest-|V| first; WORKERS≈45 when nproc/cpu.max allows
+N_SIMS=100 WORKERS=45 NO_EVENTS=1 FAMILIES=baseline,CF-D,CF-S,U,K \
   bash analysis/attack_under_PO/counterfactual_batch1/run_batch1_cluster.sh
 
 # If wall time too long (see smoke time estimate): drop K+U first
-#   N_SIMS=100 WORKERS=12 FAMILIES=baseline,CF-D,CF-S bash .../run_batch1_cluster.sh
+#   N_SIMS=100 WORKERS=45 NO_EVENTS=1 FAMILIES=baseline,CF-D,CF-S bash .../run_batch1_cluster.sh
 
 # --- 3) Appendix: old station epicenter, SAME seeds (same N_SIMS) ---
 OUT=results_cf_batch1_2023_pooled_epicenter_station EPICENTER_MODE=station \

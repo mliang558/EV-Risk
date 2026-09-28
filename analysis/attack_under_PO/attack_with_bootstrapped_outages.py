@@ -113,6 +113,8 @@ def compute_event_loss(
     radius_km: float,
     eff_before: float | None = None,
     removal_cache: dict | None = None,
+    graph_id: str | None = None,
+    removal_cache_max: int = 50_000,
 ) -> Tuple[float, float, float, float, float, list]:
     """
     Compute efficiency loss for a single outage event.
@@ -122,9 +124,14 @@ def compute_event_loss(
     eff_before, eff_after, eff_loss, pct_loss, lcc_frac, affected_nodes
         On miss (affected empty): eff_after=eff_before, losses 0, lcc_frac=1 —
         does NOT recompute global_efficiency.
-        removal_cache: optional dict frozenset(S) -> (eff_after, lcc_frac)
-        shared across events/scenarios on the same graph G.
+
+    removal_cache
+        Optional dict. Keys are ``(graph_id, frozenset(S))`` so CF-D dose graphs
+        never collide. Values: ``(eff_after, lcc_frac)``. LRU-trimmed to
+        ``removal_cache_max`` entries when using OrderedDict-like dicts.
     """
+    from collections import OrderedDict
+
     n_vertices = G.number_of_nodes()
     if eff_before is None:
         eff_before = nx.global_efficiency(G)
@@ -145,9 +152,12 @@ def compute_event_loss(
         # Miss: E(G\\S)=E(G); skip efficiency (dominant cost)
         return eff_before, eff_before, 0.0, 0.0, 1.0, []
 
-    key = frozenset(affected)
+    gid = graph_id if graph_id is not None else f"id:{id(G)}"
+    key = (gid, frozenset(affected))
     if removal_cache is not None and key in removal_cache:
         eff_after, lcc_frac_val = removal_cache[key]
+        if isinstance(removal_cache, OrderedDict):
+            removal_cache.move_to_end(key)
     else:
         G_temp = G.copy()
         G_temp.remove_nodes_from(affected)
@@ -158,6 +168,10 @@ def compute_event_loss(
         lcc_frac_val = lcc_fraction(G_temp, n_vertices)
         if removal_cache is not None:
             removal_cache[key] = (float(eff_after), float(lcc_frac_val))
+            if isinstance(removal_cache, OrderedDict):
+                removal_cache.move_to_end(key)
+                while len(removal_cache) > max(100, int(removal_cache_max)):
+                    removal_cache.popitem(last=False)
 
     eff_loss = eff_before - eff_after
     pct_loss = eff_loss / eff_before if eff_before > 0 else 0.0

@@ -28,9 +28,13 @@ export PYTHONPATH="$PWD/analysis:$PWD/analysis/attack_under_PO:$PYTHONPATH"
 
 ## Prerequisites (data; must before any run)
 
+**Geography:** see `../GEOGRAPHY_FIPS_LOCK.md` — county shp = **tl_2021** (legacy CT
+FIPS matching EAGLE-I/MCC); tracts = **TIGER 2020** + 2020 census (or ACS on 2020 GEOID).
+Do not swap in 2023 county boundaries (CT planning regions break CT+RI).
+
 ```bash
 # Census-tract population units for network-independent epicenters (NO station-KDE)
-export CENSUS_API_KEY=...   # recommended
+export CENSUS_API_KEY=...   # required unless strata CSV has filled population
 python analysis/attack_under_PO/build_pop_units_epicenter.py
 # → data/processed/pop_units_epicenter.gpkg
 # Must include tracts for merged units: MD+DE+DC, CT+RI, SD+ND

@@ -43,6 +43,7 @@ from compute_impact_radius import (
     load_county_geometry_and_mcc,
     load_coverage_history,
     resolve_county_shapefile,
+    assert_county_geoids_match_eagle_i,
     STATE_NAME_TO_ABBR,
 )
 from attack_with_bootstrapped_outages import (
@@ -76,7 +77,7 @@ def load_network(data_path: Path) -> nx.Graph:
 
 
 def load_county_polygons(project_root: Path) -> gpd.GeoDataFrame:
-    """Load county polygons (CONUS + DC) with fips_str."""
+    """Load county polygons (CONUS + DC) with fips_str (EAGLE-I FIPS vintage)."""
     shp_path = resolve_county_shapefile(project_root)
     gdf = gpd.read_file(shp_path)
     if "STATEFP" in gdf.columns:
@@ -87,6 +88,7 @@ def load_county_polygons(project_root: Path) -> gpd.GeoDataFrame:
         raise ValueError("Shapefile must contain GEOID column for county FIPS.")
 
     gdf["fips_str"] = gdf["GEOID"].astype(str).str.zfill(5)
+    assert_county_geoids_match_eagle_i(gdf["fips_str"])
     return gdf[["fips_str", "STATEFP", "geometry"]]
 
 

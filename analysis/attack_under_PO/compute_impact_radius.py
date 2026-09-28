@@ -31,9 +31,17 @@ import geopandas as gpd
 
 
 def resolve_county_shapefile(project_root: Path) -> Path:
-    """Find tl_2021_us_county.shp (repo parent, or attack_under_PO/demographic data)."""
+    """
+    Find county shapefile aligned with EAGLE-I / MCC FIPS.
+
+    Locked to **tl_2021** (legacy CT 8 counties 09001–09015). Do NOT use
+    TIGER 2022+ county files: CT planning-region equivalents (09110–09190)
+    will not join to EAGLE-I outage FIPS (still legacy through 2023 in our
+    cleaned panels).
+    """
     here = Path(__file__).resolve().parent
     candidates = [
+        project_root / "notebooks" / "tl_2021_us_county" / "tl_2021_us_county.shp",
         project_root.parent / "tl_2021_us_county" / "tl_2021_us_county.shp",
         project_root / "tl_2021_us_county" / "tl_2021_us_county.shp",
         here / "demographic data" / "tl_2021_us_county.shp",
@@ -41,10 +49,59 @@ def resolve_county_shapefile(project_root: Path) -> Path:
     ]
     for p in candidates:
         if p.is_file():
+            name = p.as_posix().lower()
+            if "tl_2022" in name or "tl_2023" in name or "tl_2024" in name:
+                continue  # never auto-pick post-CT-reform vintages
             return p
     raise FileNotFoundError(
-        "County shapefile not found. Tried:\n  " + "\n  ".join(str(c) for c in candidates)
+        "County shapefile not found (need tl_2021_us_county for EAGLE-I FIPS).\n"
+        "Tried:\n  " + "\n  ".join(str(c) for c in candidates)
     )
+
+
+# CT planning-region county-equivalents (Census mid-2022+). Not in EAGLE-I panels.
+_CT_PLANNING_REGION_FIPS = frozenset(
+    {
+        "09110",
+        "09120",
+        "09130",
+        "09140",
+        "09150",
+        "09160",
+        "09170",
+        "09180",
+        "09190",
+    }
+)
+_CT_LEGACY_COUNTY_FIPS = frozenset(
+    {"09001", "09003", "09005", "09007", "09009", "09011", "09013", "09015"}
+)
+
+
+def assert_county_geoids_match_eagle_i(geoids: "pd.Series | list[str]") -> None:
+    """
+    Fail fast if county GEOIDs look like CT planning regions.
+
+    EAGLE-I cleaned outages (2018–2023) + MCC use legacy CT county FIPS only.
+    """
+    vals = {str(g).zfill(5) for g in geoids}
+    bad = vals & _CT_PLANNING_REGION_FIPS
+    if bad:
+        raise ValueError(
+            "County shapefile contains Connecticut planning-region FIPS "
+            f"{sorted(bad)}. Those codes do not appear in EAGLE-I/MCC "
+            f"(legacy CT counties are {sorted(_CT_LEGACY_COUNTY_FIPS)}). "
+            "Use tl_2021_us_county (or any pre-2022 county vintage), not "
+            "tl_2022+/2023 county files. CT is merged with RI as unit "
+            "'Connecticut' — FIPS mismatch would silently drop polygons."
+        )
+    ct = {g for g in vals if g.startswith("09")}
+    if ct and not (ct <= _CT_LEGACY_COUNTY_FIPS):
+        weird = sorted(ct - _CT_LEGACY_COUNTY_FIPS)
+        raise ValueError(
+            f"Unexpected CT GEOIDs in county shapefile: {weird}. "
+            "Expected only legacy 8 counties."
+        )
 
 
 STATE_NAME_TO_ABBR: Dict[str, str] = {
@@ -128,6 +185,7 @@ def load_county_geometry_and_mcc(project_root: Path) -> pd.DataFrame:
         raise ValueError("Shapefile must contain GEOID column for county FIPS.")
 
     gdf["fips_str"] = gdf["GEOID"].astype(str).str.zfill(5)
+    assert_county_geoids_match_eagle_i(gdf["fips_str"])
 
     # Project to equal-area CRS for proper area calculation (US national Albers)
     gdf_proj = gdf.to_crs("EPSG:5070")

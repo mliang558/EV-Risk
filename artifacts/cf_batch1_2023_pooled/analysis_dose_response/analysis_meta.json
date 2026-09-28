@@ -1,0 +1,12 @@
+{
+  "dose_pcts": [
+    0,
+    10,
+    20,
+    30,
+    50
+  ],
+  "framing": "OAT dose-response; compare slopes; no cost conversion",
+  "n_units": 45,
+  "policy_blurb": "Across 45 units, OLS slopes of %\u0394L on intervention intensity (%): severity reduction steeper than NEVI corridor expansion in 26/45 units; NEVI corridor steeper in 19/45. Main CF-D places new hypernodes every 50 mi along interstate corridors, excluding sites <10 km from existing hypernodes (coverage expansion, not within-cluster densification). Population-weighted and uniform-null rules are robustness / null controls. Epicenters are locked to the baseline network (new nodes may be covered by R_c but never chosen as epicenter). Comparisons are per-unit intensity change, not dollar costs."
+}

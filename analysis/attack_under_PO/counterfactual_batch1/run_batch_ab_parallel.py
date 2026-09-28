@@ -2,15 +2,18 @@
 """
 Batch A / B — year-specific outage persistence tests (#1).
 
-A: network year t × outage year t   (true co-temporal)
+A: network year t × outage year t   (true co-temporal; t=2018..2023)
 B: network fixed 2023 × outage year t  (weather-only fluctuation)
+
+B at t=2023 ≡ A at t=2023 (same 2023 net + 2023 outages), so default B
+years are 2018..2022 only (5 year-runs). Copy/symlink A/2023 → B/2023 if needed.
 
 Reuses the same CRN engine as Batch 1. Separate output roots — never overwrites
 results_mc_10km_panel_2018_2026/ or results_cf_batch1_*.
 
 Usage:
-  python analysis/attack_under_PO/counterfactual_batch1/run_batch_ab_parallel.py \\
-      --design A --years 2018 2019 2020 2021 2022 2023 --n-sims 100 --workers 12
+  DESIGN=A ... bash .../run_batch_ab_cluster.sh
+  DESIGN=B ... bash .../run_batch_ab_cluster.sh   # years 2018-2022
 """
 
 from __future__ import annotations
@@ -35,6 +38,8 @@ from counterfactual_batch1.scenarios import Scenario  # noqa: E402
 DEFAULT_NETWORK_ROOT = ROOT / "outputs" / "network_graph_10km_2018_2026"
 DEFAULT_OUT_A = ROOT / "results_cf_batchA_year_matched"
 DEFAULT_OUT_B = ROOT / "results_cf_batchB_net2023_outage_year"
+YEARS_A_DEFAULT = list(range(2018, 2024))  # 2018..2023
+YEARS_B_DEFAULT = list(range(2018, 2023))  # 2018..2022 (skip 2023 ≡ A)
 
 
 def _default_workers() -> int:
@@ -140,6 +145,7 @@ def _worker(args: tuple) -> str:
         n_sims,
         force,
         write_events,
+        epicenter_mode,
     ) = args
 
     os.environ.setdefault("OMP_NUM_THREADS", "1")
@@ -181,6 +187,7 @@ def _worker(args: tuple) -> str:
         outage_year=int(outage_year),
         force=force,
         write_events=write_events,
+        epicenter_mode=epicenter_mode,
     )
 
 
@@ -189,13 +196,34 @@ def main() -> None:
     parser.add_argument("--design", choices=("A", "B"), required=True)
     parser.add_argument("--network-root", type=str, default=str(DEFAULT_NETWORK_ROOT))
     parser.add_argument("--out", type=str, default="")
-    parser.add_argument("--years", type=int, nargs="+", default=list(range(2018, 2024)))
+    parser.add_argument(
+        "--years",
+        type=int,
+        nargs="+",
+        default=None,
+        help="A default 2018-2023; B default 2018-2022 (skip 2023≡A)",
+    )
     parser.add_argument("--n-sims", type=int, default=100)
     parser.add_argument("--workers", type=int, default=None)
     parser.add_argument("--only", type=str, default="")
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--no-events", action="store_true")
+    parser.add_argument(
+        "--epicenter-mode",
+        type=str,
+        default="population",
+        choices=("population", "station"),
+    )
     args = parser.parse_args()
+
+    if args.years is None:
+        args.years = YEARS_A_DEFAULT if args.design == "A" else YEARS_B_DEFAULT
+    if args.design == "B" and 2023 in args.years:
+        print(
+            "[CF-B] note: year 2023 ≡ Batch A/2023; prefer YEARS without 2023 "
+            "or symlink A results into B/2023 after A finishes.",
+            flush=True,
+        )
 
     network_root = Path(args.network_root)
     if not network_root.is_absolute():
@@ -214,6 +242,7 @@ def main() -> None:
         jobs = build_jobs_B(network_root, args.years, only)
 
     workers = args.workers if args.workers is not None else _default_workers()
+    workers = max(1, min(int(workers), max(len(jobs), 1)))
     (out_root / "batch_manifest.json").write_text(
         json.dumps(
             {
@@ -221,7 +250,11 @@ def main() -> None:
                 "years": args.years,
                 "n_sims": args.n_sims,
                 "n_jobs": len(jobs),
-                "note": "Year-specific outage severity pool; λ still from pooled ADVI",
+                "epicenter_mode": args.epicenter_mode,
+                "note": (
+                    "Year-specific outage severity pool; λ from pooled ADVI. "
+                    "B skips 2023 by default (= A/2023)."
+                ),
             },
             indent=2,
         ),
@@ -242,6 +275,7 @@ def main() -> None:
             args.n_sims,
             args.force,
             not args.no_events,
+            args.epicenter_mode,
         )
         for j in jobs
     ]

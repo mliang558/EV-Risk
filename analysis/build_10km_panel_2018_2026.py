@@ -236,7 +236,15 @@ def ensure_stations_csv(year: int, processed_dir: Path) -> Path:
         return out
     raw = default_csv_path(_PROJECT, year)
     if not raw.is_file():
-        raise FileNotFoundError(f"Missing raw AFDC CSV for {year}: {raw}")
+        raise FileNotFoundError(
+            f"Need Step-1 stations for {year}. Missing both:\n"
+            f"  processed: {out}\n"
+            f"  raw AFDC:  {raw}\n"
+            f"For CF scenario K on the cluster, upload/copy "
+            f"data/processed/stations_{year}_48states.csv "
+            f"(same file used to build the 10 km 2023 nets). "
+            f"Raw historical AFDC is not required if the processed CSV exists."
+        )
     processed_dir.mkdir(parents=True, exist_ok=True)
     print(f"[{year}] Export Step1 -> {out.name}")
     prepare_stations(load_raw_csv(raw)).to_csv(out, index=False)

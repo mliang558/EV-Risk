@@ -31,7 +31,7 @@ from select_epicenter_by_population import (
     choose_epicenter_population_mode,
     require_pop_units,
 )
-from region_merge_config import STATE_NAME_TO_ABBR
+from compute_impact_radius import STATE_NAME_TO_ABBR
 
 from .rates import build_r_table, ensure_outage_year, r_lookup
 from .sampling import (

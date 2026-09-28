@@ -21,6 +21,16 @@ for p in (ROOT, ANALYSIS):
     if str(p) not in sys.path:
         sys.path.insert(0, str(p))
 
+_panel = ANALYSIS / "build_10km_panel_2018_2026.py"
+if not _panel.is_file():
+    raise SystemExit(
+        f"Missing {_panel}\n"
+        "Needed only for scenario K. Either:\n"
+        "  curl -fsSL -o analysis/build_10km_panel_2018_2026.py \\\n"
+        "    https://raw.githubusercontent.com/mliang558/EV-Risk/main/analysis/build_10km_panel_2018_2026.py\n"
+        "or drop K from FAMILIES (default is baseline,CF-D,CF-S,U)."
+    )
+
 import build_10km_panel_2018_2026 as b10  # noqa: E402
 
 

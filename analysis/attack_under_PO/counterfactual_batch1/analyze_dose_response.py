@@ -72,29 +72,31 @@ def load_panel(batch_dir: Path) -> pd.DataFrame:
 
 
 def attach_quadrants(df: pd.DataFrame, quadrant_csv: Path) -> pd.DataFrame:
-    if not quadrant_csv.is_file():
-        df["quadrant"] = "unknown"
-        return df
-    q = pd.read_csv(quadrant_csv)
-    # map unit / label / state
-    key_cols = [c for c in ("state", "display_name") if c in q.columns]
-    q = q[key_cols + ["quadrant", "quadrant_label", "n_nodes"]].copy()
     out = df.copy()
-    out = out.merge(q, left_on="unit", right_on="state", how="left", suffixes=("", "_q"))
-    miss = out["quadrant"].isna()
-    if miss.any() and "label" in out.columns:
-        out2 = df.loc[miss].drop(columns=[c for c in out.columns if c not in df.columns], errors="ignore")
-        # retry on label
-        m2 = df.merge(
-            q,
-            left_on="label",
-            right_on="state",
-            how="left",
-        )
+    if not quadrant_csv.is_file():
+        out["quadrant"] = "unknown"
+        out["quadrant_label"] = "unknown"
+        return out
+    q = pd.read_csv(quadrant_csv)
+    if "quadrant" not in q.columns:
+        out["quadrant"] = "unknown"
+        out["quadrant_label"] = "unknown"
+        return out
+    if "quadrant_label" not in q.columns:
+        q["quadrant_label"] = q["quadrant"].astype(str)
+    key_cols = [c for c in ("state", "display_name") if c in q.columns]
+    keep = key_cols + [c for c in ("quadrant", "quadrant_label", "n_nodes") if c in q.columns]
+    q = q[keep].copy()
+    if "state" in q.columns:
+        out = out.merge(q, left_on="unit", right_on="state", how="left", suffixes=("", "_q"))
+    miss = out["quadrant"].isna() if "quadrant" in out.columns else pd.Series(True, index=out.index)
+    if miss.any() and "label" in out.columns and "state" in q.columns:
+        m2 = df.merge(q, left_on="label", right_on="state", how="left")
         out.loc[miss, "quadrant"] = m2.loc[miss, "quadrant"].values
         if "quadrant_label" in m2.columns:
             out.loc[miss, "quadrant_label"] = m2.loc[miss, "quadrant_label"].values
     out["quadrant"] = out["quadrant"].fillna("unknown")
+    out["quadrant_label"] = out.get("quadrant_label", pd.Series(index=out.index)).fillna("unknown")
     return out
 
 
@@ -321,6 +323,9 @@ def main() -> None:
 
     panel = load_panel(batch_dir)
     panel = attach_quadrants(panel, Path(args.quadrant))
+    for col in ("quadrant", "quadrant_label"):
+        if col not in panel.columns:
+            panel[col] = "unknown"
     dose = dose_response_table(panel)
     # attach quadrant onto dose table
     qmap = panel.drop_duplicates("unit")[["unit", "quadrant", "quadrant_label"]]

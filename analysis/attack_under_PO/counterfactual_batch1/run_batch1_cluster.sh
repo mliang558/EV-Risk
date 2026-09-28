@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 # Counterfactual Batch 1 — cluster launcher (2023 × pooled outages, CRN).
 # Does NOT touch results_mc_10km_panel_2018_2026/.
+#
+# Optimized defaults for a 64-core / high-RAM node:
+#   - one process per analysis unit (WORKERS ≈ n_units)
+#   - jobs submitted largest-|V| first (CA starts immediately)
+#   - OMP/MKL threads = 1 inside each worker
+#   - skip event dumps on full runs (metrics/summary still written)
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
@@ -16,16 +22,20 @@ OUT="${OUT:-results_cf_batch1_2023_pooled}"
 DENSIFY_CACHE="${DENSIFY_CACHE:-outputs/network_graph_cf_densify_2023}"
 K5KM_ROOT="${K5KM_ROOT:-outputs/network_graph_5km_2018_2026}"
 N_SIMS="${N_SIMS:-100}"
-WORKERS="${WORKERS:-$(nproc 2>/dev/null || echo 8)}"
-# Priority: policy claim first
-FAMILIES="${FAMILIES:-baseline,CF-D,CF-S,U,K}"
+# Prefer all visible CPUs; runner caps at n_units
+NPROC_ALL="$(nproc --all 2>/dev/null || nproc 2>/dev/null || echo 8)"
+WORKERS="${WORKERS:-$NPROC_ALL}"
+# Main OAT claim first; add K later if needed (5 km rebuild is expensive)
+FAMILIES="${FAMILIES:-baseline,CF-D,CF-S,U}"
 ONLY="${ONLY:-}"
 EPICENTER_MODE="${EPICENTER_MODE:-population}"
+# Full panel: skip per-event gz (huge I/O). Smoke should set NO_EVENTS=0.
+NO_EVENTS="${NO_EVENTS:-1}"
 
 mkdir -p "$OUT" "$DENSIFY_CACHE"
 
 echo "[CF-B1] ROOT=$ROOT"
-echo "[CF-B1] OUT=$OUT N_SIMS=$N_SIMS WORKERS=$WORKERS FAMILIES=$FAMILIES EPICENTER=$EPICENTER_MODE"
+echo "[CF-B1] OUT=$OUT N_SIMS=$N_SIMS WORKERS=$WORKERS FAMILIES=$FAMILIES EPICENTER=$EPICENTER_MODE NO_EVENTS=$NO_EVENTS"
 
 # Optional: build 5 km nets if K is requested
 if [[ "$FAMILIES" == *K* ]]; then
@@ -51,6 +61,9 @@ if [[ -n "$ONLY" ]]; then
 fi
 if [[ "${FORCE:-0}" == "1" ]]; then
   ARGS+=(--force)
+fi
+if [[ "$NO_EVENTS" == "1" ]]; then
+  ARGS+=(--no-events)
 fi
 
 python analysis/attack_under_PO/counterfactual_batch1/run_batch1_parallel.py "${ARGS[@]}"

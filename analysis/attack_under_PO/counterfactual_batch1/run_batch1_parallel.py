@@ -84,15 +84,28 @@ def build_jobs(
             print(f"[skip] missing pickle for {unit}")
             continue
         members = str(row.get("members", unit))
+        n_nodes = int(row["n_nodes"]) if "n_nodes" in row and pd_notna(row["n_nodes"]) else 0
         jobs.append(
             {
                 "label": display,
                 "unit": unit,
                 "member_states": members_abbr_to_full_names(members),
                 "pkl_path": str(pkl.resolve()),
+                "n_nodes": n_nodes,
             }
         )
+    # Largest networks first so CA/NY/TX start immediately (long-tail makespan)
+    jobs.sort(key=lambda j: (-int(j.get("n_nodes", 0)), j["unit"]))
     return jobs
+
+
+def pd_notna(x) -> bool:
+    try:
+        import pandas as pd
+
+        return bool(pd.notna(x))
+    except Exception:
+        return x is not None
 
 
 def pd_read(path: Path):
@@ -245,6 +258,16 @@ def main() -> None:
     )
     print(f"  out -> {out_root}")
     print(f"  scenarios: {', '.join(s.key for s in sc)}")
+    print(
+        "  schedule (largest |V| first): "
+        + ", ".join(f"{j['unit']}(n={j.get('n_nodes', '?')})" for j in jobs[:8])
+        + (" ..." if len(jobs) > 8 else ""),
+        flush=True,
+    )
+
+    # Cap workers at n_jobs (no benefit beyond one process per unit)
+    workers = max(1, min(int(workers), len(jobs)))
+    print(f"  workers (capped): {workers}", flush=True)
 
     task_args = [
         (

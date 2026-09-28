@@ -84,3 +84,7 @@ analysis/attack_under_PO/demographic data/
 *.prj
 *.sbx
 *.sbn
+
+# CF Batch1 analysis artifacts (explicit exception; not MC panel data)
+!artifacts/cf_batch1_2023_pooled/
+!artifacts/cf_batch1_2023_pooled/**

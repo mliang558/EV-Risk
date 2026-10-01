@@ -23,10 +23,10 @@ DEFAULT_BATCH = ROOT / "results_batch2_yearly"
 
 def _load_summaries(batch_dir: Path) -> pd.DataFrame:
     rows = []
-    for p in batch_dir.glob("*/*/summary.csv"):
-        # path: family / netY_outZ / unit / summary.csv
+    # path: family / netY_outZ / unit / summary.csv
+    for p in batch_dir.rglob("summary.csv"):
         parts = p.relative_to(batch_dir).parts
-        if len(parts) < 3:
+        if len(parts) < 4:
             continue
         df = pd.read_csv(p)
         rows.append(df)
@@ -38,8 +38,11 @@ def _load_summaries(batch_dir: Path) -> pd.DataFrame:
 def _load_metrics_means(batch_dir: Path) -> pd.DataFrame:
     """One row per family×year_network×year_outage×unit from metrics means."""
     rows = []
-    for p in batch_dir.glob("*/*/metrics_baseline.csv"):
+    # path: family / netY_outZ / unit / metrics_baseline.csv
+    for p in batch_dir.rglob("metrics_baseline.csv"):
         parts = p.relative_to(batch_dir).parts
+        if len(parts) < 4:
+            continue
         family = parts[0]
         tag = parts[1]
         unit = parts[2]
@@ -62,6 +65,8 @@ def _load_metrics_means(batch_dir: Path) -> pd.DataFrame:
                 "n_events_tot": int(m["n_events"].sum()) if "n_events" in m else 0,
             }
         )
+    if not rows:
+        raise SystemExit(f"No metrics_baseline.csv under {batch_dir}")
     return pd.DataFrame(rows)
 
 
@@ -92,8 +97,10 @@ def bootstrap_spearman(
     rng = np.random.default_rng(seed)
     # collect per-unit sim vectors
     store: dict[tuple[str, object], np.ndarray] = {}
-    for p in batch_dir.glob(f"{family}/*/metrics_baseline.csv"):
+    for p in batch_dir.glob(f"{family}/*/*/metrics_baseline.csv"):
         parts = p.relative_to(batch_dir).parts
+        if len(parts) < 4:
+            continue
         unit = parts[2]
         m = pd.read_csv(p)
         yo = m["year_outage"].iloc[0] if "year_outage" in m else parts[1]
@@ -160,6 +167,11 @@ def main() -> None:
     out.mkdir(parents=True, exist_ok=True)
 
     panel = _load_metrics_means(batch)
+    print(
+        f"[analyze] panel rows={len(panel)} families={sorted(panel['family'].unique())} "
+        f"units={panel['unit'].nunique()}",
+        flush=True,
+    )
     panel.to_csv(out / "panel_unit_year_means.csv", index=False)
 
     # For A/B use year_outage; for C use year_network (pooled outage)

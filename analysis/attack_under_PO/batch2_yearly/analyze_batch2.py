@@ -206,6 +206,34 @@ def main() -> None:
     rho_df = pd.DataFrame(rows)
     rho_df.to_csv(out / "spearman_by_family_yearpair.csv", index=False)
 
+    # ODI / NDI: attribute rank instability U=1-ρ to outage (B) vs network (C)
+    odi_rows = []
+    for (y1, y2, metric), g in rho_df.groupby(["year_a", "year_b", "metric"]):
+        piv = {r["family"]: float(r["spearman_rho"]) for _, r in g.iterrows()}
+        if not all(f in piv and piv[f] == piv[f] for f in ("A", "B", "C")):
+            continue
+        u_a, u_b, u_c = 1.0 - piv["A"], 1.0 - piv["B"], 1.0 - piv["C"]
+        denom = u_b + u_c
+        odi = float(u_b / denom) if denom > 1e-12 else float("nan")
+        ndi = float(u_c / denom) if denom > 1e-12 else float("nan")
+        odi_rows.append(
+            {
+                "year_a": y1,
+                "year_b": y2,
+                "metric": metric,
+                "rho_A": piv["A"],
+                "rho_B": piv["B"],
+                "rho_C": piv["C"],
+                "U_A": u_a,
+                "U_B": u_b,
+                "U_C": u_c,
+                "ODI": odi,
+                "NDI": ndi,
+            }
+        )
+    odi_df = pd.DataFrame(odi_rows)
+    odi_df.to_csv(out / "odi_ndi_by_yearpair.csv", index=False)
+
     # fallback rates
     fb = panel.copy()
     tot = (
@@ -245,6 +273,8 @@ def main() -> None:
                 "batch_dir": str(batch),
                 "n_boot": args.n_boot,
                 "ci": "90% percentile bootstrap over sims",
+                "ODI": "U_B/(U_B+U_C) with U=1-Spearman; outage share of rank instability",
+                "NDI": "U_C/(U_B+U_C); network share of rank instability",
             },
             indent=2,
         ),
@@ -252,6 +282,9 @@ def main() -> None:
     )
     print(f"Saved under {out}")
     print(rho_df.head(20).to_string(index=False))
+    if not odi_df.empty:
+        print("\n=== ODI / NDI (U=1-ρ; ODI=U_B/(U_B+U_C)) ===")
+        print(odi_df.to_string(index=False))
 
 
 if __name__ == "__main__":

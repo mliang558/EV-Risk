@@ -44,6 +44,7 @@ DEFAULT_K5KM_ROOT = ROOT / "outputs" / "network_graph_5km_2018_2026"
 DEFAULT_OUT = ROOT / "results_cf_batch1_2023_pooled"
 DEFAULT_DENSIFY_CACHE = ROOT / "outputs" / "network_graph_cf_densify_2023"
 NETWORK_YEAR = 2023
+RUN_LABEL = os.environ.get("ATTACK_RUN_LABEL", "CF-B1")
 
 
 def _default_workers() -> int:
@@ -292,7 +293,7 @@ def main() -> None:
     (out_root / "batch_manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
 
     print(
-        f"[CF-B1] units={len(jobs)} scenarios={len(sc)} "
+        f"[{RUN_LABEL}] units={len(jobs)} scenarios={len(sc)} "
         f"n_sims={args.n_sims} workers={workers}"
     )
     print(f"  out -> {out_root}")
@@ -349,7 +350,7 @@ def main() -> None:
     ok = sum(1 for r in results if r.startswith("ok:"))
     skip = sum(1 for r in results if r.startswith("skip:"))
     print(
-        f"[CF-B1] done ok={ok} skip={skip} other={len(results)-ok-skip} "
+        f"[{RUN_LABEL}] done ok={ok} skip={skip} other={len(results)-ok-skip} "
         f"in {(time.time()-t0)/60:.1f} min"
     )
 

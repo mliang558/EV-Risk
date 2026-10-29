@@ -13,6 +13,7 @@ For each sim_id:
 from __future__ import annotations
 
 import json
+import os
 import pickle
 import time
 from pathlib import Path
@@ -572,7 +573,8 @@ def run_unit_batch1(
         if (sim_id + 1) % 5 == 0 or (sim_id + 1) == n_sims:
             elapsed = time.time() - t0
             print(
-                f"[CF-B1] {label} {sim_id+1}/{n_sims} "
+                f"[{os.environ.get('ATTACK_RUN_LABEL', 'CF-B1')}] "
+                f"{label} {sim_id+1}/{n_sims} "
                 f"({100*(sim_id+1)/n_sims:.0f}%) elapsed {elapsed/60:.1f} min",
                 flush=True,
             )

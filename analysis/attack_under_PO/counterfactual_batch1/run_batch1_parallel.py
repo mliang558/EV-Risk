@@ -80,9 +80,10 @@ def members_abbr_to_full_names(members: str) -> list[str]:
 
 def build_jobs(
     network_root: Path,
+    network_year: int,
     only_units: set[str] | None,
 ) -> list[dict]:
-    year_dir = network_root / str(NETWORK_YEAR)
+    year_dir = network_root / str(network_year)
     summary_path = year_dir / "network_summary.csv"
     net_dir = year_dir / "network_structures"
     if not summary_path.is_file():
@@ -149,6 +150,7 @@ def _worker(args: tuple) -> str:
         write_events,
         bootstrap_pool,
         epicenter_mode,
+        network_year,
     ) = args
 
     os.environ.setdefault("OMP_NUM_THREADS", "1")
@@ -169,7 +171,7 @@ def _worker(args: tuple) -> str:
     keyset = {x.strip() for x in keys.split(",") if x.strip()} or None
     scenarios = filter_scenarios(batch1_scenarios(), fam, keyset)
 
-    k5 = Path(k5km_root) / str(NETWORK_YEAR) / "network_structures" / f"network_{unit}.pkl"
+    k5 = Path(k5km_root) / str(network_year) / "network_structures" / f"network_{unit}.pkl"
     if not k5.is_file():
         k5 = None
 
@@ -204,8 +206,9 @@ def _write_panel(out_root: Path) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="CF Batch1 parallel runner (2023×pooled)")
+    parser = argparse.ArgumentParser(description="Baseline/CF runner (network year × pooled outages)")
     parser.add_argument("--network-root", type=str, default=str(DEFAULT_NETWORK_ROOT))
+    parser.add_argument("--network-year", type=int, default=NETWORK_YEAR)
     parser.add_argument("--k5km-root", type=str, default=str(DEFAULT_K5KM_ROOT))
     parser.add_argument("--densify-cache", type=str, default=str(DEFAULT_DENSIFY_CACHE))
     parser.add_argument("--out", type=str, default=str(DEFAULT_OUT))
@@ -248,7 +251,7 @@ def main() -> None:
     densify_cache.mkdir(parents=True, exist_ok=True)
 
     only_set = {x.strip() for x in args.only.split(",") if x.strip()} or None
-    jobs = build_jobs(network_root, only_set)
+    jobs = build_jobs(network_root, args.network_year, only_set)
     if not jobs:
         raise SystemExit("No jobs.")
 
@@ -258,9 +261,10 @@ def main() -> None:
     sc = filter_scenarios(batch1_scenarios(), fam, keyset)
 
     manifest = {
-        "batch": "cf_batch1_2023_pooled",
+        "batch": "network_year_pooled_outages",
+        "analysis_role": "canonical" if args.network_year == 2023 else "longitudinal",
         "created_utc": datetime.now(timezone.utc).isoformat(),
-        "network_year": NETWORK_YEAR,
+        "network_year": args.network_year,
         "outage_pool": "pooled_2018_2023",
         "posterior_file": "advi_results_2018_2023/county_advi_posterior.nc",
         "county_metadata_file": "advi_results_2018_2023/county_estimates_advi.csv",
@@ -325,6 +329,7 @@ def main() -> None:
             not args.no_events,
             args.bootstrap_pool,
             args.epicenter_mode,
+            args.network_year,
         )
         for j in jobs
     ]

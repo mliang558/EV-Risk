@@ -22,12 +22,14 @@ ONLY="${ONLY:-}"
 
 check_inputs() {
   python analysis/attack_under_PO/canonical/validate_inputs.py \
-    --network-root "$NETWORK_ROOT"
+    --network-root "$NETWORK_ROOT" \
+    --year 2023
 }
 
 run_attack() {
   local args=(
     --network-root "$NETWORK_ROOT"
+    --network-year 2023
     --out "$OUT"
     --n-sims "$N_SIMS"
     --workers "$WORKERS"

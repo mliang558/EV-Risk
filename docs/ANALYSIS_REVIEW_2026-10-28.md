@@ -160,4 +160,3 @@ python tests/validate_review_artifacts.py
 
 - `artifacts/cf_batch1_2023_pooled/`
 - `artifacts/batch2_yearly/analysis_batch2/`
-

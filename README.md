@@ -1,115 +1,100 @@
-# EV Charging Network Resilience Under Power Outages
+# EV charging vulnerability under power outages
 
-Analysis of electric vehicle (EV) charging infrastructure vulnerability to power outages and coordinated infrastructure attacks across the United States.
+This repository contains the network construction, outage Monte Carlo simulation, and
+robustness analyses used in the manuscript.
 
-## Overview
+## Active manuscript workflow
 
-This project investigates resilience of EV charging networks through:
-- **Network analysis** on AFDC charging station data (2018-2026, 49 states)
-- **Bayesian power outage modeling** using 10 years of historical EAGLEI data (2014-2023)
-- **Attack simulations** combining targeted node removal with realistic outage scenarios
+The current paper uses one canonical analysis and two focused checks.
 
-## Project Structure
+| Analysis | Question | Status |
+| --- | --- | --- |
+| Canonical pooled analysis | Which analytical units have the highest long-run outage vulnerability? | Main result; unchanged |
+| Batch 2 yearly robustness | Does the ranking change with network year or outage year? | Required robustness check |
+| Batch 1 intervention | Does NEVI-style node expansion reduce loss? | Optional policy/appendix analysis |
 
-```
-analysis/
-├── run_charging_network.py              # Main network construction & attack simulation
-├── plot_charging_network_results.py     # Results visualization
-├── build_network_pickle_only.py         # Network serialization
-│
-├── attack_under_PO/                     # Integrated attack + outage analysis
-│   ├── monte_carlo_outage_attack.py     # Monte Carlo simulations
-│   ├── realistic_outage_simulator_improved.py
-│   ├── compute_impact_radius.py
-│   └── module_3_03/                     # Advanced simulation module
-│
-└── power_outage/
-    ├── PO frequency modeling/           # Bayesian hierarchical model for outage frequency
-    └── PO severity modeling/            # Bootstrap resampling for outage severity
+The detailed code and result audit is in
+[`docs/ANALYSIS_REVIEW_2026-10-28.md`](docs/ANALYSIS_REVIEW_2026-10-28.md).
 
-notebooks/
-└── PO_data_cleaning/                    # Data preprocessing & EDA
-```
+## One cluster entry point
 
-## Quick Start
-
-### 1. Build charging networks
-```bash
-# Single year
-python analysis/run_charging_network.py "data/raw/alt_fuel_stations_historical_day (Jan 1 2025).csv"
-
-# Batch process all years (2018-2026)
-python analysis/run_charging_network.py --batch-from-raw
-```
-
-**Method**: 200m spatial clustering → Voronoi adjacency → weighted network graph
-
-### 2. Simulate attacks under power outages
-```bash
-cd analysis/attack_under_PO/
-python monte_carlo_outage_attack.py --state CA --n-sims 1000
-```
-
-### 3. Visualize results
-```bash
-python analysis/plot_charging_network_results.py --run-dir outputs/charging_network/run__*
-```
-
-## Requirements
+From the project root on the cluster, with the project environment activated:
 
 ```bash
-pip install numpy scipy pandas networkx scikit-learn pyproj matplotlib seaborn arviz pymc3
+pip install -r analysis/attack_under_PO/counterfactual_batch1/requirements-batch1.txt
+
+# Verify the environment and run both smoke tests.
+bash analysis/attack_under_PO/run_review_experiments_cluster.sh smoke
+
+# Run only the temporal robustness experiment.
+N_SIMS=100 WORKERS=45 \
+  bash analysis/attack_under_PO/run_review_experiments_cluster.sh temporal
+
+# Run only the NEVI-style intervention and severity comparator.
+N_SIMS=100 WORKERS=45 \
+  bash analysis/attack_under_PO/run_review_experiments_cluster.sh intervention
+
+# Analyze completed outputs, including the node-denominator audit and MC reliability.
+bash analysis/attack_under_PO/run_review_experiments_cluster.sh analyze
 ```
 
-- Python 3.7+
-- **Core**: numpy, scipy, pandas, networkx
-- **Network**: scikit-learn, pyproj
-- **Bayesian**: arviz, pymc3
-- **Visualization**: matplotlib, seaborn
+The optional placement controls are intentionally separate because the uniform null uses
+10 placement replicates at every positive dose:
 
-## Key Findings
+```bash
+N_SIMS=100 WORKERS=45 \
+  bash analysis/attack_under_PO/run_review_experiments_cluster.sh placement
+```
 
-**Network Characteristics (2025)**:
-- Analyzed **49 US states** with **10,000+ charging stations**
-- Built weighted graphs with Voronoi adjacency
-- Computed network efficiency, clustering, degree distribution
+The central script writes under `results_review/` and does not overwrite the canonical
+result tree.
 
-**Attack Resilience**:
-- Targeted attacks (degree/betweenness) cause 3-5× more damage than random failures
-- Small networks (MT, WY, VT) show <3 alternative paths per node
-- Large networks (CA, TX, NY) demonstrate higher redundancy
+## Method conventions that must match the manuscript
 
-**Outputs**:
-- `network_characteristics_ALL.csv`: Per-state metrics (nodes, edges, efficiency, clustering, density)
-- `attack_results_ALL.csv`: Efficiency loss by strategy, removal %, and node removal strategy
-- State-level vulnerability rankings and geospatial impact maps
+- Charging stations are grouped into hypernodes using the stated spatial clustering
+  radius.
+- Voronoi/Delaunay construction determines spatial adjacency.
+- The outage metric uses NetworkX unweighted global efficiency. Geographic distance
+  affects adjacency, but stored edge-distance weights do not enter shortest paths.
+- The main loss is node-normalized. Intervention results also report total loss without
+  the scenario node-count denominator.
+- Batch 1 uses common random numbers across scenarios and population-based epicenters.
+- NEVI-style expansion places candidates along interstate corridors; it is not a claim
+  of exact regulatory NEVI compliance.
 
-## Algorithm Details
+## Active code
 
-### Network Construction
-1. **Spatial Clustering**: 200m greedy aggregation of charging station locations
-2. **Graph Construction**: Voronoi diagram adjacency (Delaunay fallback)
-3. **Edge Weighting**: 
-   ```
-   w_ij = (norm_distance + ε) / √(capacity_i × capacity_j)
-   ```
+```text
+analysis/attack_under_PO/
+├── monte_carlo_outage_attack.py          # canonical outage simulation core
+├── mc_panel_metrics.py                   # canonical panel metrics
+├── counterfactual_batch1/                # intervention and placement controls
+├── batch2_yearly/                        # temporal robustness
+└── run_review_experiments_cluster.sh     # central cluster entry point
+```
 
-### Attack Simulation
-- **Strategies**: Random, Degree, Betweenness, Capacity, Closeness centrality
-- **Metrics**: Global efficiency loss at removal percentages [5%, 10%, ..., 85%]
-- **Reproducibility**: Random attacks run 10 times with fixed seed
+The directories named `old/` and `module_3_03/`, plus exploratory GNN scripts, are not
+part of the active manuscript workflow. They remain in the tree only for provenance or
+legacy data-path compatibility and should not be used as analysis entry points.
 
-### Power Outage Modeling
-- **Frequency**: Bayesian hierarchical GLM (ADVI) for county-level event rates
-- **Severity**: Bootstrap resampling from historical EAGLEI database
-- **Integration**: Monte Carlo simulation of outage impact on network resilience
+## Review artifacts
+
+```text
+artifacts/
+├── cf_batch1_2023_pooled/       # compact intervention results and denominator audit
+└── batch2_yearly/               # compact temporal-robustness analysis outputs
+```
+
+Raw data, network pickles, and full per-simulation result trees remain on the cluster and
+are not duplicated in Git.
+
+## Environment
+
+The review pipeline requires Python 3 with NumPy, pandas, SciPy, NetworkX, GeoPandas,
+Shapely, PyProj, xarray, netCDF4, ArviZ, Matplotlib, and PyArrow. Use the pinned minimum
+requirements in `counterfactual_batch1/requirements-batch1.txt` and run the environment
+check before launching cluster jobs.
 
 ## License
 
-Research use - Available for academic and educational purposes
-
-## References
-
-- AFDC (Alternative Fuels Data Center): www.afdc.energy.gov
-- EAGLEI Database: Historical power outage records
-- NetworkX documentation for graph algorithms
+Research use; see [`LICENSE`](LICENSE).

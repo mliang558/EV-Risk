@@ -1,5 +1,8 @@
 # Batch 2 — year-specific outage persistence (A / B / C)
 
+This is the retained temporal robustness experiment for the manuscript. Use the central
+entry point `analysis/attack_under_PO/run_review_experiments_cluster.sh` for new runs.
+
 Baseline only. Reuses Batch-1 loss evaluation, epicenter (tract population),
 removal cache `(graph_id, frozenset(S))`, and metrics. New package:
 `analysis/attack_under_PO/batch2_yearly/`. Outputs: `results_batch2_yearly/`.
@@ -47,6 +50,8 @@ N_SIMS=100 WORKERS=45 NO_EVENTS=1 FAMILIES="A B C" \
   bash analysis/attack_under_PO/batch2_yearly/run_cluster.sh
 
 python analysis/attack_under_PO/batch2_yearly/analyze_batch2.py \
+  --batch-dir results_batch2_yearly
+python analysis/attack_under_PO/batch2_yearly/check_mc_reliability.py \
   --batch-dir results_batch2_yearly
 ```
 

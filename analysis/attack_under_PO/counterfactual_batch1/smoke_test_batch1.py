@@ -288,30 +288,8 @@ def check_p_hit(unit_dir: Path, r: CheckResult) -> None:
         r.pass_(msg)
 
 
-def check_k_network(unit_dir: Path, r: CheckResult) -> None:
-    print("\n[4] K_5km |V| vs 10 km")
-    mb = _read_metrics(unit_dir, "baseline")
-    mk = _read_metrics(unit_dir, "K_5km")
-    if mk is None:
-        r.warn_("K_5km not in this run — skip")
-        return
-    if mb is None:
-        r.fail_("missing baseline metrics for |V| compare")
-        return
-    n10 = float(mb["n_nodes"].mean())
-    n5 = float(mk["n_nodes"].mean())
-    ratio = n5 / n10 if n10 > 0 else float("nan")
-    msg = f"|V|_10km={n10:.0f}, |V|_5km={n5:.0f}, ratio={ratio:.2f}"
-    if n5 > n10 * 1.2:
-        r.pass_(msg)
-    elif n5 > n10:
-        r.warn_(msg + " — only slightly larger; confirm 5 km rebuild")
-    else:
-        r.fail_(msg + " — K is not larger than 10 km baseline")
-
-
 def check_nevi_meta(unit_dir: Path, densify_cache: Path | None, r: CheckResult) -> None:
-    print("\n[5] NEVI meta: n_nevi + n_pop_fill == n_target")
+    print("\n[4] NEVI meta: n_nevi + n_pop_fill == n_target")
     meta_path = unit_dir / "densify_meta.json"
     metas: dict = {}
     if meta_path.is_file():
@@ -511,7 +489,6 @@ def main() -> None:
         check_crn(unit_dir, r)
         check_monotonicity(unit_dir, r)
         check_p_hit(unit_dir, r)
-        check_k_network(unit_dir, r)
         check_nevi_meta(unit_dir, densify, r)
         check_fallback(unit_dir, r, expect_fallback=args.expect_fallback)
 

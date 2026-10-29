@@ -39,10 +39,10 @@ FAMILY_LABEL = {
     "CF-D": "NEVI corridor (main)",
     "CF-D-pop": "Population-weighted",
     "CF-D-null": "Uniform null (mean of 10 reps)",
-    "CF-D-within": "Within-cluster (beyond resolution)",
     "CF-S": "Severity: N_aff −% (R_c×√(1−x))",
-    "CF-T": "Duration reduction (−% T_i)",
 }
+
+ANALYSIS_FAMILIES = ("CF-D", "CF-D-pop", "CF-D-null", "CF-S")
 
 
 def _parse_dose(row: pd.Series) -> float:
@@ -57,7 +57,8 @@ def _parse_dose(row: pd.Series) -> float:
     return float("nan")
 
 
-def load_panel(batch_dir: Path) -> pd.DataFrame:
+def load_panel(batch_dir: Path | str) -> pd.DataFrame:
+    batch_dir = Path(batch_dir)
     panel_path = batch_dir / "panel_scenario_summary.csv"
     if panel_path.is_file():
         df = pd.read_csv(panel_path)
@@ -120,22 +121,31 @@ def dose_response_table(df: pd.DataFrame) -> pd.DataFrame:
     base = work[work["family"] == "baseline"][["unit", "L_tilde_mean"]].rename(
         columns={"L_tilde_mean": "L0"}
     )
-    fams = ("CF-D", "CF-D-pop", "CF-D-null", "CF-D-within", "CF-S", "CF-T")
     rows = []
-    for fam in fams:
-        for _, b in base.iterrows():
+    sub = work[work["family"].isin(ANALYSIS_FAMILIES)].copy()
+    sub = sub.merge(base, on="unit", how="left")
+
+    # Add a baseline dose only when a family does not already contain an explicit
+    # dose-0 scenario.  The previous implementation always injected dose 0 and
+    # then appended CF-D_nevi_p0 / CF-S_m0, so those regressions incorrectly used
+    # six observations instead of the intended five unique doses.
+    for (unit, fam), g in sub.groupby(["unit", "family"], sort=False):
+        if not (g["dose_pct"].astype(float) == 0.0).any():
+            b = base.loc[base["unit"] == unit]
+            if b.empty:
+                continue
+            L0 = float(b.iloc[0]["L0"])
             rows.append(
                 {
-                    "unit": b["unit"],
+                    "unit": unit,
                     "family": fam,
                     "dose_pct": 0.0,
-                    "L_tilde_mean": b["L0"],
+                    "L_tilde_mean": L0,
                     "delta_L_tilde": 0.0,
                     "delta_L_tilde_pct": 0.0,
                 }
             )
-    sub = work[work["family"].isin(fams)].copy()
-    sub = sub.merge(base, on="unit", how="left")
+
     for _, r in sub.iterrows():
         L0 = float(r["L0"]) if pd.notna(r["L0"]) else float("nan")
         L = float(r["L_tilde_mean"])
@@ -151,7 +161,12 @@ def dose_response_table(df: pd.DataFrame) -> pd.DataFrame:
                 "delta_L_tilde_pct": dLp,
             }
         )
-    return pd.DataFrame(rows)
+    out = pd.DataFrame(rows).sort_values(["unit", "family", "dose_pct"])
+    duplicate = out.duplicated(["unit", "family", "dose_pct"], keep=False)
+    if duplicate.any():
+        bad = out.loc[duplicate, ["unit", "family", "dose_pct"]]
+        raise ValueError(f"Duplicate dose rows after aggregation:\n{bad.to_string(index=False)}")
+    return out.reset_index(drop=True)
 
 
 def fit_slopes(dose_df: pd.DataFrame) -> pd.DataFrame:
@@ -196,7 +211,6 @@ def plot_pooled_dose_response(dose_df: pd.DataFrame, out_path: Path) -> None:
         "CF-D-pop": "#117A65",
         "CF-D-null": "#7F8C8D",
         "CF-S": "#B2182B",
-        "CF-T": "#5DADE2",
     }
     styles = {"CF-D": "o-", "CF-D-pop": "s--", "CF-D-null": "^:", "CF-S": "o-"}
     for fam in ("CF-D", "CF-D-pop", "CF-D-null", "CF-S"):
@@ -294,7 +308,7 @@ def policy_blurb(slopes: pd.DataFrame) -> str:
     d_better = (d < s).sum()
     n = int(wide.dropna(subset=["CF-D", "CF-S"]).shape[0])
     return (
-        f"Across {n} units, OLS slopes of %ΔL on intervention intensity (%): "
+        f"Across {n} units, OLS slopes of percent change in L on intervention intensity (%): "
         f"severity reduction steeper than NEVI corridor expansion in {s_better}/{n} units; "
         f"NEVI corridor steeper in {d_better}/{n}. "
         "Main CF-D places new hypernodes every 50 mi along interstate corridors, "
@@ -332,6 +346,15 @@ def main() -> None:
     dose = dose.merge(qmap, on="unit", how="left")
     slopes = fit_slopes(dose)
     slopes = slopes.merge(qmap, on="unit", how="left")
+
+    primary = slopes[slopes["family"].isin(("CF-D", "CF-S"))]
+    incomplete = primary[primary["n_doses"] != len(DOSE_PCTS)]
+    if not incomplete.empty:
+        raise ValueError(
+            "Primary dose-response families must contain exactly five unique doses "
+            f"{DOSE_PCTS}. Incomplete rows:\n"
+            + incomplete[["unit", "family", "n_doses"]].to_string(index=False)
+        )
 
     dose.to_csv(out_dir / "dose_response_long.csv", index=False)
     slopes.to_csv(out_dir / "slopes_by_unit.csv", index=False)

@@ -8,14 +8,14 @@ Default out: results_cf_batch1_2023_pooled/
 Usage (cluster):
   export PYTHONPATH="$ROOT/analysis:$ROOT/analysis/attack_under_PO"
   python analysis/attack_under_PO/counterfactual_batch1/run_batch1_parallel.py \\
-      --n-sims 100 --workers 12 --families baseline,CF-D,CF-S,U,K
+      --n-sims 100 --workers 12 --families baseline,CF-D,CF-S
 
 Priority families: baseline,CF-D (NEVI),CF-S (N_affected),U,K
 # Requires: data/processed/pop_units_epicenter.gpkg (census-tract epicenters)
 # Optional: CF-D-pop, CF-D-null; EPICENTER_MODE=station only for appendix ablation
 # Base nets: reuse outputs/network_graph_10km_2018_2026/2023 (do not rebuild).
 # Epicenters: census-tract population only (never station-KDE).
-Optional later: CF-T,U,K
+Optional appendix controls: CF-D-pop,CF-D-null
 """
 
 from __future__ import annotations
@@ -213,8 +213,8 @@ def main() -> None:
     parser.add_argument(
         "--families",
         type=str,
-        default="baseline,CF-D,CF-S,U,K",
-        help="Comma families: baseline,CF-D,CF-D-pop,CF-D-null,CF-S,CF-T,U,K",
+        default="baseline,CF-D,CF-S",
+        help="Comma families: baseline,CF-D,CF-D-pop,CF-D-null,CF-S",
     )
     parser.add_argument("--keys", type=str, default="", help="Optional explicit scenario keys")
     parser.add_argument("--bootstrap-pool", choices=("all", "severe_top10"), default="all")

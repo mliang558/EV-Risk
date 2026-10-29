@@ -72,15 +72,14 @@ def compute_network_features(G: nx.Graph) -> dict[str, float]:
     except Exception:
         avg_clustering = float("nan")
 
+    if not nx.is_connected(und):
+        raise ValueError(
+            "Network feature calculation requires a connected analytical-unit graph; "
+            f"received {nx.number_connected_components(und)} components"
+        )
     try:
-        if nx.is_connected(und):
-            diameter = float(nx.diameter(und))
-            alg_conn = float(nx.algebraic_connectivity(und))
-        else:
-            largest = max(nx.connected_components(und), key=len)
-            sub = und.subgraph(largest).copy()
-            diameter = float(nx.diameter(sub))
-            alg_conn = float(nx.algebraic_connectivity(sub))
+        diameter = float(nx.diameter(und))
+        alg_conn = float(nx.algebraic_connectivity(und))
     except Exception:
         diameter = float("nan")
         alg_conn = float("nan")

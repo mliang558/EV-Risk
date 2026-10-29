@@ -21,6 +21,7 @@ Optional appendix controls: CF-D-pop,CF-D-null
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
 import json
 import os
 import sys
@@ -257,14 +258,24 @@ def main() -> None:
 
     manifest = {
         "batch": "cf_batch1_2023_pooled",
+        "created_utc": datetime.now(timezone.utc).isoformat(),
         "network_year": NETWORK_YEAR,
         "outage_pool": "pooled_2018_2023",
+        "posterior_file": "advi_results_2018_2023/county_advi_posterior.nc",
+        "county_metadata_file": "advi_results_2018_2023/county_estimates_advi.csv",
         "state_rate_definition": "Lambda_s = sum_c lambda_c",
         "county_assignment": "P(c|s) = lambda_c / Lambda_s",
         "event_bootstrap": "with replacement from selected county; state pool fallback",
         "epicenter_mode": args.epicenter_mode,
+        "shortest_path": "unweighted hop count",
+        "efficiency_denominator": "fixed baseline N*(N-1) after node removal",
+        "event_loss": "((E0-E_after)/E0) * duration_hours",
+        "annual_loss_W": "sum(event_loss)",
+        "reported_L_tilde": "annual_loss_W / baseline_n_nodes",
         "cf_s_definition": "N_affected -x% => R_c *= sqrt(1-x)",
         "n_sims": args.n_sims,
+        "workers_requested": int(workers),
+        "workers_used": int(max(1, min(int(workers), len(jobs)))),
         "n_units": len(jobs),
         "scenarios": [s.key for s in sc],
         "network_root": str(network_root),

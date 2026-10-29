@@ -23,8 +23,11 @@ removal from appearing to improve performance merely by shrinking the set of
 pairs being averaged.
 
 Run `run_canonical_cluster.sh check` before the full simulation and
-`run_canonical_cluster.sh validate` afterward. The formal output root is
-`results_canonical_2023_pooled_sumlambda/`.
+`run_canonical_cluster.sh validate` afterward. The default formal output root
+includes the run date and simulation count, for example
+`results_canonical_1029_2023_pooled_sumlambda_n100/`. Its batch manifest
+records the network and posterior inputs, sampling rules, loss definitions,
+worker count, timestamp, and Git commit.
 
 The county-selection construction preserves each county's marginal Poisson
 rate. It does not preserve temporal ordering or multi-county storm dependence;

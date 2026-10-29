@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import pickle
 import sys
 from pathlib import Path
 
@@ -18,6 +17,7 @@ for path in (ROOT, ATTACK):
         sys.path.insert(0, str(path))
 
 from compute_impact_radius import resolve_county_shapefile  # noqa: E402
+from monte_carlo_outage_attack import load_network  # noqa: E402
 from sample_lambda_from_posterior import (  # noqa: E402
     aggregate_state_lambda,
     load_posterior,
@@ -62,8 +62,7 @@ def main() -> None:
         if not pkl_path.is_file():
             pkl_path = net_dir / f"network_region_{unit}.pkl"
         require(pkl_path, f"network {unit}")
-        with pkl_path.open("rb") as handle:
-            graph = pickle.load(handle)
+        graph = load_network(pkl_path)
         if graph.number_of_nodes() < 2:
             raise ValueError(f"{unit}: graph has fewer than two nodes")
 

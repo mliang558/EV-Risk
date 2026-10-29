@@ -97,16 +97,33 @@ def draw_crn_events(
     uses census-tract population only (network-independent). CF densify nodes
     never affect epicenter placement.
     """
-    df_draw = draw_lambda_realization(county_post_df, flat_lam, random_state=sim_id)
+    # Independent, reproducible random streams for posterior, count, bootstrap,
+    # and epicenter draws. Reusing the same seed to restart every stage would
+    # unnecessarily couple their first pseudorandom values.
+    stage_seqs = np.random.SeedSequence(sim_id).spawn(4)
+    stage_seeds = [int(seq.generate_state(1, dtype=np.uint32)[0]) for seq in stage_seqs]
+    lambda_seed, count_seed, bootstrap_seed, epicenter_seed = stage_seeds
+
+    df_draw_all = draw_lambda_realization(
+        county_post_df, flat_lam, random_state=lambda_seed
+    )
+    # Each worker evaluates one analytical unit. Restrict the draw before
+    # constructing events; generating all nationwide events in every worker is
+    # distributionally redundant and dominates runtime once state rates are
+    # correctly defined as county-rate sums.
+    df_draw = df_draw_all[df_draw_all["state"].isin(target_states)].copy()
+    if df_draw.empty:
+        return pd.DataFrame()
     state_df = aggregate_state_lambda(df_draw)
-    state_df = draw_state_event_counts(state_df, random_state=sim_id)
+    state_df = draw_state_event_counts(state_df, random_state=count_seed)
 
     pool = _filter_outages_by_year(outages_df, outage_year)
+    pool = pool[pool["state"].isin(target_states)].copy()
     boot_all = bootstrap_state_outages(
         state_df,
         df_draw,
         pool,
-        random_state=sim_id,
+        random_state=bootstrap_seed,
         event_pool=bootstrap_pool,
     )
     boot_state = boot_all[boot_all["sim_state"].isin(target_states)].copy()
@@ -124,7 +141,7 @@ def draw_crn_events(
         )
     boot_state = pd.concat(chunks, axis=0, ignore_index=True)
 
-    rng = np.random.default_rng(sim_id)
+    rng = np.random.default_rng(epicenter_seed)
     epic_lats: list[float] = []
     epic_lons: list[float] = []
     mode = (epicenter_mode or "population").lower().strip()
@@ -417,8 +434,8 @@ def run_unit_batch1(
     Run all Batch-1 scenarios for one analysis unit with shared CRN draws.
 
     Outputs under out_dir / <unit>/ :
-      crn_events.csv.gz          — shared event draws (once)
-      events_<scenario>.csv.gz   — per-scenario event losses
+      crn_events.csv.gz          — shared event draws (when write_events=True)
+      events_<scenario>.csv.gz   — per-scenario losses (when write_events=True)
       metrics_<scenario>.csv     — per-sim L_tilde etc.
       summary.csv                — pooled means + ΔL vs baseline
       manifest.json
@@ -510,22 +527,23 @@ def run_unit_batch1(
         )
         if events.empty:
             continue
-        crn_rows.append(
-            events[
-                [
-                    "sim_id",
-                    "event_id",
-                    "seed",
-                    "year",
-                    "fips_str",
-                    "epicenter_lat",
-                    "epicenter_lon",
-                    "radius_base_km",
-                    "duration_hours",
-                    "used_state_pool_fallback",
-                ]
-            ].rename(columns={"year": "year_hist"})
-        )
+        if write_events:
+            crn_rows.append(
+                events[
+                    [
+                        "sim_id",
+                        "event_id",
+                        "seed",
+                        "year",
+                        "fips_str",
+                        "epicenter_lat",
+                        "epicenter_lon",
+                        "radius_base_km",
+                        "duration_hours",
+                        "used_state_pool_fallback",
+                    ]
+                ].rename(columns={"year": "year_hist"})
+            )
 
         for sc in active:
             G_sc, note = resolve_graph_for_scenario(
@@ -559,12 +577,13 @@ def run_unit_batch1(
                 flush=True,
             )
 
-    if not crn_rows:
+    if not any(metrics_by_sc.values()):
         return f"empty:{unit}"
 
-    pd.concat(crn_rows, ignore_index=True).to_csv(
-        unit_out / "crn_events.csv.gz", index=False, compression="gzip"
-    )
+    if write_events and crn_rows:
+        pd.concat(crn_rows, ignore_index=True).to_csv(
+            unit_out / "crn_events.csv.gz", index=False, compression="gzip"
+        )
 
     summary_rows: list[dict] = []
     baseline_mean = None
@@ -589,6 +608,11 @@ def run_unit_batch1(
                 "L_tilde_mean": mean_L,
                 "L_tilde_std": float(mdf["L_tilde"].std(ddof=1)) if len(mdf) > 1 else float("nan"),
                 "L_lcc_tilde_mean": float(mdf["L_lcc_tilde"].mean()) if len(mdf) else float("nan"),
+                "W_mean": float(mdf["total_rel_loss_x_duration"].mean()) if len(mdf) else float("nan"),
+                "P_hit_mean": float(mdf["P_hit"].mean()) if len(mdf) else float("nan"),
+                "L_event_mean": float(mdf["L_event"].mean()) if len(mdf) else float("nan"),
+                "E_loss_given_hit_mean": float(mdf["E_loss_given_hit"].mean()) if len(mdf) else float("nan"),
+                "n_events_mean": float(mdf["n_events"].mean()) if len(mdf) else float("nan"),
                 "n_nodes_mean": float(mdf["n_nodes"].mean()) if len(mdf) else float("nan"),
                 "description": sc.description,
             }
@@ -649,7 +673,10 @@ def run_unit_batch1(
         "outage_year": outage_year,
         "bootstrap_pool": bootstrap_pool,
         "epicenter_mode": epicenter_mode,
-        "seed_rule": "seed = sim_id (0..n_sims-1); appendix must use same n_sims",
+        "seed_rule": (
+            "SeedSequence(sim_id).spawn(4): independent posterior, event-count, "
+            "bootstrap, and epicenter streams"
+        ),
         "scenarios": [s.key for s in active],
         "skipped_scenarios": sorted(skip_keys),
         "pkl_path": str(pkl_path),

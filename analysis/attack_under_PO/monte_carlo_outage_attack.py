@@ -287,7 +287,7 @@ def run_monte_carlo_for_state(
         else:
             df_draw = build_raw_lambda_draw(county_post_df)
         state_df = aggregate_state_lambda(df_draw)
-        state_df = draw_state_event_counts(state_df)
+        state_df = draw_state_event_counts(state_df, random_state=sim_id)
 
         # 2) Bootstrap outages (all states), then filter our target state
         boot_all = bootstrap_state_outages(

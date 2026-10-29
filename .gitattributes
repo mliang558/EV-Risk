@@ -6,3 +6,5 @@
 *.json text eol=lf
 *.yml text eol=lf
 *.yaml text eol=lf
+# Preserve this legacy CRLF file until it is intentionally normalized.
+analysis/attack_under_PO/counterfactual_batch1/crn_engine.py -text whitespace=cr-at-eol

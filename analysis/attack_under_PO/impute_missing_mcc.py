@@ -112,10 +112,15 @@ def build_imputed_mcc(
     # These FIPS are known omissions in the official legacy MCC.  Exclude any
     # temporary values that may already have been copied into MCC.csv, then
     # reconstruct all nine by one consistent rule.
-    donor_mcc = mcc[~mcc["County_FIPS"].isin(target_fips)].copy()
-    donor_mcc["state_fips"] = donor_mcc["County_FIPS"].str[:2]
-    donor_mcc = donor_mcc[donor_mcc["state_fips"].isin(prefixes)].copy()
-    donor_count = donor_mcc.groupby("state_fips").size().reindex(prefixes, fill_value=0)
+    existing_mcc = mcc[~mcc["County_FIPS"].isin(target_fips)].copy()
+    calibration_mcc = existing_mcc.copy()
+    calibration_mcc["state_fips"] = calibration_mcc["County_FIPS"].str[:2]
+    calibration_mcc = calibration_mcc[
+        calibration_mcc["state_fips"].isin(prefixes)
+    ].copy()
+    donor_count = calibration_mcc.groupby("state_fips").size().reindex(
+        prefixes, fill_value=0
+    )
     too_small = donor_count[donor_count < 10]
     if not too_small.empty:
         raise ValueError(f"Too few donor counties: {too_small.to_dict()}")
@@ -132,7 +137,7 @@ def build_imputed_mcc(
         state_reference["state_population"]
         - state_reference["missing_population"]
     )
-    state_reference["donor_customers"] = donor_mcc.groupby("state_fips")[
+    state_reference["donor_customers"] = calibration_mcc.groupby("state_fips")[
         "Customers"
     ].sum()
     state_reference["state_ratio"] = (
@@ -166,16 +171,21 @@ def build_imputed_mcc(
     additions = imputation_population[["county_fips", "Customers"]].rename(
         columns={"county_fips": "County_FIPS"}
     )
-    completed = pd.concat([donor_mcc, additions], ignore_index=True)
+    completed = pd.concat([existing_mcc, additions], ignore_index=True)
     completed = completed.sort_values("County_FIPS").reset_index(drop=True)
     completed["Customers"] = completed["Customers"].round().astype(int)
 
-    original = donor_mcc.set_index("County_FIPS")["Customers"]
+    original = existing_mcc.set_index("County_FIPS")["Customers"]
     preserved = completed.set_index("County_FIPS").loc[original.index, "Customers"]
     if not preserved.equals(original.astype(int)):
         raise AssertionError("An existing MCC value changed")
     if completed["County_FIPS"].duplicated().any():
         raise AssertionError("Completed MCC contains duplicate FIPS")
+    expected_rows = len(existing_mcc) + len(target_fips)
+    if len(completed) != expected_rows:
+        raise AssertionError(
+            f"Completed MCC has {len(completed)} rows; expected {expected_rows}"
+        )
 
     audit = imputation_population[
         [

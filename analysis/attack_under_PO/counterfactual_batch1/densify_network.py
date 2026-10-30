@@ -24,7 +24,7 @@ from analysis.build_charging_network_step2 import (
 
 CLUSTER_RADIUS_M = 10_000.0
 CORRIDOR_SPACING_M = 50 * 1609.344
-CACHE_SCHEMA = "interstate_50mi_10km_unit_boundary_v2"
+CACHE_SCHEMA = "interstate_50mi_10km_unit_boundary_v3"
 ROOT = Path(__file__).resolve().parents[3]
 EV_PROJECT = Path(__file__).resolve().parents[4]
 
@@ -34,8 +34,17 @@ def _node_coords(graph: nx.Graph) -> tuple[np.ndarray, list]:
     coords = []
     for node in nodes:
         data = graph.nodes[node]
-        lat, lon = data.get("location", (data.get("lat"), data.get("lon")))
-        coords.append((float(lat), float(lon)))
+        location = data.get("location")
+        lat, lon = (
+            location if location is not None else (data.get("lat"), data.get("lon"))
+        )
+        try:
+            lat, lon = float(lat), float(lon)
+        except (TypeError, ValueError) as error:
+            raise ValueError(f"Node {node!r} has no valid latitude/longitude") from error
+        if not np.isfinite([lat, lon]).all():
+            raise ValueError(f"Node {node!r} has no valid latitude/longitude")
+        coords.append((lat, lon))
     return np.asarray(coords), nodes
 
 
@@ -45,6 +54,12 @@ def _graph_signature(graph: nx.Graph) -> str:
     coords = coords[np.lexsort((coords[:, 1], coords[:, 0]))]
     digest = hashlib.sha256(coords.astype("<f8", copy=False).tobytes()).hexdigest()
     return f"n={len(coords)};sha256={digest}"
+
+
+def _boundary_signature(boundary) -> str:
+    if boundary is None:
+        return "none"
+    return hashlib.sha256(boundary.wkb).hexdigest()
 
 
 def _rebuild_edges(graph: nx.Graph) -> nx.Graph:
@@ -100,18 +115,20 @@ def _interstates_near(graph: nx.Graph, boundary=None):
         lat_max, lon_max = coords.max(axis=0)
         boundary = box(lon_min - 0.35, lat_min - 0.35, lon_max + 0.35, lat_max + 0.35)
 
-    roads = gpd.read_file(resolve_interstate_shapefile())
+    road_path = resolve_interstate_shapefile()
+    roads = gpd.read_file(road_path)
     roads = roads.set_crs(4326) if roads.crs is None else roads.to_crs(4326)
-    if "RTTYP" in roads:
-        interstate = roads[roads["RTTYP"].astype(str).str.upper() == "I"]
-        if not interstate.empty:
-            roads = interstate
-    elif {"MTFCC", "FULLNAME"}.issubset(roads.columns):
-        mask = roads["FULLNAME"].astype(str).str.contains(
+    if "RTTYP" in roads.columns:
+        roads = roads[roads["RTTYP"].astype(str).str.upper() == "I"].copy()
+    elif "FULLNAME" in roads.columns:
+        roads = roads[roads["FULLNAME"].astype(str).str.contains(
             r"I-|Interstate", case=False, na=False
+        )].copy()
+    elif road_path.name.lower() != "us_interstate_highways.shp":
+        raise ValueError(
+            "Road file has neither RTTYP nor FULLNAME; Interstate segments "
+            "cannot be identified safely"
         )
-        if mask.any():
-            roads = roads[mask]
     roads = roads[roads.intersects(boundary)].copy()
     roads["geometry"] = roads.geometry.intersection(boundary)
     return roads[~roads.geometry.is_empty]
@@ -120,7 +137,7 @@ def _interstates_near(graph: nx.Graph, boundary=None):
 def _corridor_candidates(roads, spacing_m: float) -> np.ndarray:
     """Sample route points in a local equidistant projection."""
     import geopandas as gpd
-    from shapely.geometry import Point
+    from shapely.ops import linemerge, unary_union
 
     if roads.empty:
         return np.empty((0, 2))
@@ -136,12 +153,22 @@ def _corridor_candidates(roads, spacing_m: float) -> np.ndarray:
         "+datum=WGS84 +units=m +no_defs"
     )
     projected = roads.to_crs(projection)
-    points = []
+    line_parts = []
     for geometry in projected.geometry:
-        lines = [geometry] if geometry.geom_type == "LineString" else list(geometry.geoms)
-        for line in lines:
-            distances = np.arange(0, line.length + 1, spacing_m)
-            points.extend(line.interpolate(min(d, line.length)) for d in distances)
+        if geometry is None or geometry.is_empty:
+            continue
+        if geometry.geom_type == "LineString":
+            line_parts.append(geometry)
+        elif geometry.geom_type in ("MultiLineString", "GeometryCollection"):
+            line_parts.extend(g for g in geometry.geoms if g.geom_type == "LineString")
+    if not line_parts:
+        return np.empty((0, 2))
+    merged = linemerge(unary_union(line_parts))
+    lines = [merged] if merged.geom_type == "LineString" else list(merged.geoms)
+    points = []
+    for line in lines:
+        distances = np.arange(0, line.length + 1, spacing_m)
+        points.extend(line.interpolate(min(d, line.length)) for d in distances)
     if not points:
         return np.empty((0, 2))
     points = gpd.GeoSeries(points, crs=projection).to_crs(4326)
@@ -253,6 +280,7 @@ def load_or_build_densified(
     """Load a compatible corridor network or rebuild and cache it."""
     path = _cache_path(cache_root, pct, unit)
     signature = _graph_signature(graph)
+    boundary_signature = _boundary_signature(boundary)
     if path.is_file() and not force:
         with path.open("rb") as file:
             payload = pickle.load(file)
@@ -260,6 +288,7 @@ def load_or_build_densified(
         compatible = (
             meta.get("cache_schema") == CACHE_SCHEMA
             and meta.get("base_graph_signature") == signature
+            and meta.get("boundary_signature") == boundary_signature
             and meta.get("cluster_radius_m") == float(cluster_radius_m)
         )
         if compatible:
@@ -269,7 +298,11 @@ def load_or_build_densified(
     expanded, meta = build_corridor_network(
         graph, pct, boundary=boundary, cluster_radius_m=cluster_radius_m
     )
-    meta.update(cache_schema=CACHE_SCHEMA, base_graph_signature=signature)
+    meta.update(
+        cache_schema=CACHE_SCHEMA,
+        base_graph_signature=signature,
+        boundary_signature=boundary_signature,
+    )
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("wb") as file:
         pickle.dump({"network": expanded, "meta": meta}, file)

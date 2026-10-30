@@ -7,6 +7,7 @@ corridor networks, and severity doses are evaluated on that shared event list.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sys
@@ -27,6 +28,7 @@ from attack_with_bootstrapped_outages import (
     compute_event_loss,
 )
 from compute_impact_radius import (
+    STATE_NAME_TO_ABBR,
     load_county_geometry_and_mcc,
     load_coverage_history,
 )
@@ -55,10 +57,14 @@ from counterfactual_batch1.scenarios import Scenario
 
 def _duration_hours(row: pd.Series) -> float:
     if "duration_hours" in row and pd.notna(row.get("duration_hours")):
-        return float(row["duration_hours"])
-    if "duration_min" in row and pd.notna(row.get("duration_min")):
-        return float(row["duration_min"]) / 60.0
-    return 1.0
+        duration = float(row["duration_hours"])
+    elif "duration_min" in row and pd.notna(row.get("duration_min")):
+        duration = float(row["duration_min"]) / 60.0
+    else:
+        duration = 1.0
+    if not np.isfinite(duration) or duration < 0:
+        raise ValueError(f"Invalid event duration: {duration}")
+    return duration
 
 
 def _filter_outages_by_year(outages_df: pd.DataFrame, year: int | None) -> pd.DataFrame:
@@ -94,12 +100,20 @@ def draw_crn_events(
     uses census-tract population only (network-independent). CF densify nodes
     never affect epicenter placement.
     """
-    # Independent, reproducible random streams for posterior, count, bootstrap,
-    # and epicenter draws. Reusing the same seed to restart every stage would
-    # unnecessarily couple their first pseudorandom values.
-    stage_seqs = np.random.SeedSequence(sim_id).spawn(4)
-    stage_seeds = [int(seq.generate_state(1, dtype=np.uint32)[0]) for seq in stage_seqs]
-    lambda_seed, count_seed, bootstrap_seed, epicenter_seed = stage_seeds
+    # The posterior draw is shared across analytical units for a joint national
+    # realization. Count, event, and epicenter streams are unit-specific, while
+    # remaining shared by all intervention scenarios within that unit.
+    unit_key = "|".join(sorted(map(str, target_states))).encode("utf-8")
+    unit_entropy = int.from_bytes(hashlib.sha256(unit_key).digest()[:8], "little")
+    lambda_seed = int(
+        np.random.SeedSequence(sim_id)
+        .spawn(1)[0]
+        .generate_state(1, dtype=np.uint32)[0]
+    )
+    stage_seqs = np.random.SeedSequence([sim_id, unit_entropy]).spawn(3)
+    count_seed, bootstrap_seed, epicenter_seed = [
+        int(seq.generate_state(1, dtype=np.uint32)[0]) for seq in stage_seqs
+    ]
 
     df_draw_all = draw_lambda_realization(
         county_post_df, flat_lam, random_state=lambda_seed
@@ -110,9 +124,12 @@ def draw_crn_events(
     # correctly defined as county-rate sums.
     df_draw = df_draw_all[df_draw_all["state"].isin(target_states)].copy()
     if df_draw.empty:
-        return pd.DataFrame()
+        raise ValueError(f"Posterior contains no counties for {target_states}")
     state_df = aggregate_state_lambda(df_draw)
     state_df = draw_state_event_counts(state_df, random_state=count_seed)
+    expected_events = int(state_df["n_events_draw"].sum())
+    if expected_events == 0:
+        return pd.DataFrame()
 
     pool = _filter_outages_by_year(outages_df, outage_year)
     pool = pool[pool["state"].isin(target_states)].copy()
@@ -123,9 +140,12 @@ def draw_crn_events(
         random_state=bootstrap_seed,
         event_pool=bootstrap_pool,
     )
+    if len(boot_all) != expected_events:
+        raise RuntimeError(
+            f"Expected {expected_events} bootstrapped events for {target_states}, "
+            f"but constructed {len(boot_all)}"
+        )
     boot_state = boot_all[boot_all["sim_state"].isin(target_states)].copy()
-    if boot_state.empty:
-        return pd.DataFrame()
 
     if "year" not in boot_state.columns:
         boot_state["year"] = pd.to_datetime(boot_state["start_time"]).dt.year
@@ -133,10 +153,32 @@ def draw_crn_events(
     chunks = []
     for ev_state in boot_state["sim_state"].unique():
         chunk = boot_state[boot_state["sim_state"] == ev_state]
+        state_abbr = STATE_NAME_TO_ABBR.get(str(ev_state))
+        available_years = set(
+            cov_df.loc[cov_df["state_abbr"] == state_abbr, "year_num"]
+            .dropna()
+            .astype(int)
+        )
+        missing_years = sorted(set(chunk["year"].astype(int)) - available_years)
+        if state_abbr is None or missing_years:
+            raise ValueError(
+                f"Missing coverage history for {ev_state}: years={missing_years}"
+            )
         chunks.append(
             compute_radius_for_state_events(chunk, county_geom_mcc, cov_df, str(ev_state))
         )
     boot_state = pd.concat(chunks, axis=0, ignore_index=True)
+    radius_fields = ["Nd", "MCC", "rho", "theta_s", "impact_radius_km"]
+    invalid_radius = (
+        ~np.isfinite(boot_state[radius_fields].astype(float)).all(axis=1)
+        | (boot_state["Nd"].astype(float) < 0)
+        | (boot_state["MCC"].astype(float) <= 0)
+        | (boot_state["rho"].astype(float) <= 0)
+        | (boot_state["impact_radius_km"].astype(float) < 0)
+    )
+    if invalid_radius.any():
+        bad = sorted(boot_state.loc[invalid_radius, "fips_str"].astype(str).unique())
+        raise ValueError(f"Invalid radius inputs for county FIPS: {bad[:10]}")
 
     rng = np.random.default_rng(epicenter_seed)
     epic_lats: list[float] = []
@@ -183,9 +225,10 @@ def draw_crn_events(
 
     boot_state["epicenter_lat"] = epic_lats
     boot_state["epicenter_lon"] = epic_lons
-    boot_state = boot_state.dropna(subset=["epicenter_lat", "epicenter_lon"])
-    if boot_state.empty:
-        return pd.DataFrame()
+    missing_epicenter = boot_state[["epicenter_lat", "epicenter_lon"]].isna().any(axis=1)
+    if missing_epicenter.any():
+        bad = sorted(boot_state.loc[missing_epicenter, "fips_str"].astype(str).unique())
+        raise ValueError(f"Could not place epicenters for county FIPS: {bad[:10]}")
 
     boot_state = boot_state.reset_index(drop=True)
     boot_state["sim_id"] = int(sim_id)
@@ -486,10 +529,9 @@ def run_unit_batch1(
         )
         scenario_variants[sc.key] = variant
         if variant not in graph_cache:
-            try:
-                E0 = float(nx.global_efficiency(G_sc))
-            except Exception:
-                E0 = 0.0
+            E0 = float(nx.global_efficiency(G_sc))
+            if not np.isfinite(E0) or E0 <= 0:
+                raise ValueError(f"Invalid baseline efficiency for {unit}/{variant}: {E0}")
             graph_cache[variant] = (G_sc, E0, meta)
 
     if not scenarios:
@@ -522,6 +564,33 @@ def run_unit_batch1(
             pop_gdf=pop_gdf,
         )
         if events.empty:
+            for sc in scenarios:
+                variant = scenario_variants[sc.key]
+                G_use, E0, _ = graph_cache[variant]
+                metrics_by_sc[sc.key].append(
+                    {
+                        "sim_id": sim_id,
+                        "scenario": sc.key,
+                        "family": sc.family,
+                        "n_events": 0,
+                        "n_nodes": G_use.number_of_nodes(),
+                        "baseline_efficiency": E0,
+                        "L_tilde": 0.0,
+                        "L_lcc_tilde": 0.0,
+                        "total_rel_loss_x_duration": 0.0,
+                        "total_rel_loss_x_duration_hit": 0.0,
+                        "mean_pct_eff_loss": np.nan,
+                        "mean_lcc_frac": np.nan,
+                        "n_disrupted_nodes_mean": 0.0,
+                        "n_zero_loss_events": 0,
+                        "n_hit_events": 0,
+                        "P_hit": np.nan,
+                        "L_event": np.nan,
+                        "E_loss_given_hit": np.nan,
+                        "n_fallback_events": 0,
+                        "max_disruption_radius_km": 0.0,
+                    }
+                )
             continue
         if write_events:
             crn_rows.append(
@@ -649,8 +718,8 @@ def run_unit_batch1(
         "bootstrap_pool": bootstrap_pool,
         "epicenter_mode": epicenter_mode,
         "seed_rule": (
-            "SeedSequence(sim_id).spawn(4): independent posterior, event-count, "
-            "bootstrap, and epicenter streams"
+            "posterior stream shared by sim_id; unit-keyed independent event-count, "
+            "bootstrap, and epicenter streams; all scenarios share unit events"
         ),
         "scenarios": [s.key for s in scenarios],
         "pkl_path": str(pkl_path),

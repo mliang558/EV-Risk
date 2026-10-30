@@ -223,7 +223,9 @@ def voronoi_adjacency(coords_m: np.ndarray) -> set[tuple[int, int]]:
             adj.add((a, b))
         return adj
     except Exception:
-        tri = Delaunay(coords_m)
+        # ``QJ`` resolves exactly collinear or nearly degenerate point sets
+        # without changing the intended Delaunay fallback.
+        tri = Delaunay(coords_m, qhull_options="QJ")
         adj = set()
         for simplex in tri.simplices:
             for i in range(3):

@@ -17,6 +17,7 @@ for variable in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "
     os.environ.setdefault(variable, "1")
 
 import networkx as nx
+import numpy as np
 import pandas as pd
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -111,24 +112,82 @@ def _preflight(jobs: list[dict], deep: bool) -> None:
 
     if not deep:
         return
-    from compute_impact_radius import load_county_geometry_and_mcc, load_coverage_history
-    from sample_lambda_from_posterior import load_posterior
+    from compute_impact_radius import (
+        STATE_NAME_TO_ABBR,
+        load_county_geometry_and_mcc,
+        load_coverage_history,
+    )
+    from monte_carlo_outage_attack import load_county_polygons
+    from sample_lambda_from_posterior import load_posterior, prepare_outages_for_bootstrap
     from select_epicenter_by_population import require_pop_units
 
     counties, posterior = load_posterior()
     if posterior.ndim != 2 or posterior.shape[1] != len(counties):
         raise ValueError("Posterior county dimension does not match the county-rate table")
-    tables = (
-        pd.read_csv(required["outage events"]),
-        load_county_geometry_and_mcc(ROOT),
-        load_coverage_history(ROOT),
-        require_pop_units(ROOT),
-    )
+    outages = prepare_outages_for_bootstrap(pd.read_csv(required["outage events"]))
+    county_info = load_county_geometry_and_mcc(ROOT)
+    coverage = load_coverage_history(ROOT)
+    population = require_pop_units(ROOT)
+    polygons = load_county_polygons(ROOT)
+    tables = (outages, county_info, coverage, population, polygons)
     if any(table.empty for table in tables):
         raise ValueError("At least one required input table is empty")
+
+    target_states = {state for job in jobs for state in job["member_states"]}
+    missing_states = target_states - set(counties["state"])
+    missing_pools = target_states - set(outages["state"])
+    if missing_states or missing_pools:
+        raise ValueError(
+            f"Missing posterior states={sorted(missing_states)}; "
+            f"missing historical pools={sorted(missing_pools)}"
+        )
+
+    target_counties = counties[counties["state"].isin(target_states)].copy()
+    target_fips = set(
+        target_counties["fips"].astype(int).astype(str).str.zfill(5)
+    )
+    county_info = county_info.set_index("fips_str").reindex(sorted(target_fips))
+    invalid_counties = county_info[
+        county_info[["MCC", "rho", "area_km2"]].isna().any(axis=1)
+        | (county_info["MCC"] <= 0)
+        | (county_info["rho"] <= 0)
+        | (county_info["area_km2"] <= 0)
+    ].index.tolist()
+    polygon_fips = set(polygons["fips_str"].astype(str).str.zfill(5))
+    missing_polygons = sorted(target_fips - polygon_fips)
+    if invalid_counties or missing_polygons:
+        raise ValueError(
+            f"Invalid MCC/area counties={invalid_counties[:10]}; "
+            f"missing county polygons={missing_polygons[:10]}"
+        )
+
+    relevant = outages[outages["state"].isin(target_states)].copy()
+    customer_col = "mean_customers" if "mean_customers" in relevant else "affected_customers"
+    invalid_events = (
+        ~np.isfinite(relevant["duration_hours"].astype(float))
+        | (relevant["duration_hours"].astype(float) < 0)
+        | ~np.isfinite(relevant[customer_col].astype(float))
+        | (relevant[customer_col].astype(float) < 0)
+    )
+    if invalid_events.any():
+        count = int(invalid_events.sum())
+        raise ValueError(f"Historical event pool contains {count} invalid rows")
+
+    if "year" not in relevant.columns:
+        relevant["year"] = pd.to_datetime(relevant["start_time"]).dt.year
+    relevant["state_abbr"] = relevant["state"].map(STATE_NAME_TO_ABBR)
+    coverage_keys = set(zip(coverage["state_abbr"], coverage["year_num"].astype(int)))
+    event_keys = set(zip(relevant["state_abbr"], relevant["year"].astype(int)))
+    missing_coverage = sorted(event_keys - coverage_keys, key=str)
+    if missing_coverage:
+        raise ValueError(f"Missing state-year coverage rows: {missing_coverage[:10]}")
+
+    pop_fips = set(population["county_fips"].astype(str).str.zfill(5))
+    population_fallbacks = len(target_fips - pop_fips)
     print(
         f"PASS: {len(jobs)} networks, {posterior.shape[0]} posterior draws, "
-        f"{posterior.shape[1]} counties, and {len(tables[0])} events"
+        f"{posterior.shape[1]} counties, {len(outages)} events, and "
+        f"{population_fallbacks} county-polygon epicenter fallbacks"
     )
 
 

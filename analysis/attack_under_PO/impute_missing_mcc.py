@@ -5,9 +5,10 @@ Existing MCC values are never changed.  For a missing county c in state s,
 
     MCC_hat[c] = population[c] * median(MCC[j] / population[j]), j in s.
 
-Population is aggregated from the same tract file used for population-weighted
-outage epicenters.  The script writes a two-column MCC file for the simulator
-and a separate audit table describing every imputed county.
+Population is aggregated from the tract file used for population-weighted
+outage epicenters.  Official 2020 Census totals supplement the nine counties
+that are absent from that file.  The script writes a two-column MCC file for
+the simulator and a separate audit table describing every imputed county.
 """
 
 from __future__ import annotations
@@ -32,6 +33,11 @@ EXPECTED_MISSING = {
     "51720",
     "56031",
 }
+DEFAULT_POPULATION_SUPPLEMENT = (
+    Path(__file__).resolve().parent
+    / "reference"
+    / "missing_mcc_population_2020.csv"
+)
 
 
 def _sha256(path: Path) -> str:
@@ -81,6 +87,20 @@ def _read_population(path: Path) -> pd.DataFrame:
     table["population"] = pd.to_numeric(table["population"], errors="coerce").fillna(0)
     table = table.groupby("county_fips", as_index=False)["population"].sum()
     return table[table["population"] > 0].copy()
+
+
+def _supplement_population(
+    population: pd.DataFrame, supplement: pd.DataFrame
+) -> pd.DataFrame:
+    supplement_fips = set(supplement["county_fips"])
+    if supplement_fips != EXPECTED_MISSING:
+        raise ValueError(
+            "Population supplement must contain exactly the nine target counties. "
+            f"Missing={sorted(EXPECTED_MISSING - supplement_fips)}, "
+            f"extra={sorted(supplement_fips - EXPECTED_MISSING)}"
+        )
+    population = population[~population["county_fips"].isin(supplement_fips)]
+    return pd.concat([population, supplement], ignore_index=True)
 
 
 def build_imputed_mcc(
@@ -140,6 +160,9 @@ def build_imputed_mcc(
         reverse_state
     )
     imputation_population["source"] = "state_median_customers_per_population"
+    imputation_population["population_source"] = (
+        "2020_decennial_census_supplement"
+    )
     previous = mcc.set_index("County_FIPS")["Customers"]
     imputation_population["previous_customers"] = imputation_population[
         "county_fips"
@@ -168,6 +191,7 @@ def build_imputed_mcc(
             "previous_customers",
             "Customers",
             "source",
+            "population_source",
         ]
     ].rename(columns={"county_fips": "County_FIPS"})
     return completed, audit.sort_values("County_FIPS").reset_index(drop=True)
@@ -187,6 +211,11 @@ def main() -> None:
         default=root / "data" / "processed" / "pop_units_epicenter.gpkg",
     )
     parser.add_argument(
+        "--population-supplement",
+        type=Path,
+        default=DEFAULT_POPULATION_SUPPLEMENT,
+    )
+    parser.add_argument(
         "--mcc-out",
         type=Path,
         default=root / "notebooks" / "PO_data_cleaning" / "MCC.csv",
@@ -204,7 +233,7 @@ def main() -> None:
     unknown = sorted(set(states) - set(STATE_FIPS))
     if unknown:
         parser.error(f"Unsupported states: {unknown}")
-    for path in (args.mcc_in, args.population):
+    for path in (args.mcc_in, args.population, args.population_supplement):
         if not path.is_file():
             raise FileNotFoundError(path)
     if args.mcc_in.resolve() == args.mcc_out.resolve():
@@ -213,8 +242,12 @@ def main() -> None:
         if path.exists() and not args.force:
             raise FileExistsError(f"Refusing to overwrite {path}; use --force")
 
+    population = _supplement_population(
+        _read_population(args.population),
+        _read_population(args.population_supplement),
+    )
     completed, audit = build_imputed_mcc(
-        _read_mcc(args.mcc_in), _read_population(args.population), states
+        _read_mcc(args.mcc_in), population, states
     )
     args.mcc_out.parent.mkdir(parents=True, exist_ok=True)
     args.audit_out.parent.mkdir(parents=True, exist_ok=True)
@@ -228,6 +261,8 @@ def main() -> None:
         "source_mcc_sha256": _sha256(args.mcc_in),
         "output_mcc_sha256": _sha256(args.mcc_out),
         "population": str(args.population.resolve()),
+        "population_supplement": str(args.population_supplement.resolve()),
+        "population_supplement_sha256": _sha256(args.population_supplement),
         "n_existing_preserved": len(completed) - len(audit),
         "n_imputed": len(audit),
         "imputed_fips": audit["County_FIPS"].tolist(),

@@ -335,6 +335,3 @@ print(f"\nWrote under {OUT}")
 print(
     "NOTE: P(hit)/E[loss|hit] split and slope CIs need metrics_*.csv from cluster."
 )
-families_present = {r["family"] for r in panel}
-if not {"CF-D-pop", "CF-D-null"}.issubset(families_present):
-    print("NOTE: CF-D-pop / CF-D-null are incomplete or absent; placement cannot be compared.")

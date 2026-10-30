@@ -1,20 +1,15 @@
 #!/usr/bin/env python3
-"""
-Common-random-numbers (CRN) multi-scenario Monte Carlo engine.
+"""Common-random-number engine for the two intervention experiments.
 
-For each sim_id:
-  1. Draw λ, n_events, bootstrap outages, epicenters ONCE.
-  2. Evaluate every scenario on that same event list
-     (scale R_c / T_i, or swap graph for CF-D / K).
-  3. Cache E(G) per graph variant.
-  4. Write event-level + sim-level outputs (new result roots only).
+Each replication draws outage rates, events, and epicenters once. The baseline,
+corridor networks, and severity doses are evaluated on that shared event list.
 """
 
 from __future__ import annotations
 
 import json
 import os
-import pickle
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -23,14 +18,17 @@ import networkx as nx
 import numpy as np
 import pandas as pd
 
+ROOT = Path(__file__).resolve().parents[3]
+for path in (ROOT, ROOT / "analysis", ROOT / "analysis" / "attack_under_PO"):
+    if str(path) not in sys.path:
+        sys.path.insert(0, str(path))
+
 from attack_with_bootstrapped_outages import (
-    _affected_nodes_in_radius,
     compute_event_loss,
 )
 from compute_impact_radius import (
     load_county_geometry_and_mcc,
     load_coverage_history,
-    STATE_NAME_TO_ABBR,
 )
 from monte_carlo_outage_attack import (
     compute_radius_for_state_events,
@@ -43,7 +41,6 @@ from sample_lambda_from_posterior import (
     bootstrap_state_outages,
     draw_lambda_realization,
     draw_state_event_counts,
-    load_county_estimates,
     load_posterior,
 )
 from select_epicenter_by_stations import choose_station_epicenter_in_county
@@ -54,7 +51,6 @@ from select_epicenter_by_population import (
 
 from counterfactual_batch1.densify_network import load_or_build_densified
 from counterfactual_batch1.scenarios import Scenario
-from counterfactual_batch1.urban_counties import urban_fips_from_mcc
 
 
 def _duration_hours(row: pd.Series) -> float:
@@ -205,7 +201,6 @@ def draw_crn_events(
 def _effective_radius(
     row: pd.Series,
     scenario: Scenario,
-    urban_fips: set[str],
 ) -> float:
     r = float(row["radius_base_km"])
     if scenario.affected_customer_scale is not None:
@@ -222,12 +217,7 @@ def _effective_radius(
         rho = max(1e-6, float(row["rho"]))
         nd_effective = min(nd / theta, mcc)
         return float(np.sqrt(nd_effective / (rho * np.pi)))
-    if scenario.urban_radius_scale is not None:
-        fips = str(row.get("fips_str", "")).zfill(5)
-        if fips in urban_fips:
-            return r * float(scenario.urban_radius_scale)
-        return r
-    return r * float(scenario.radius_scale)
+    return r
 
 
 def evaluate_events_on_graph(
@@ -236,7 +226,6 @@ def evaluate_events_on_graph(
     G: nx.Graph,
     E0: float,
     scenario: Scenario,
-    urban_fips: set[str],
     removal_cache: dict | None = None,
     graph_id: str | None = None,
 ) -> pd.DataFrame:
@@ -261,8 +250,8 @@ def evaluate_events_on_graph(
     gid = graph_id or scenario.network_variant or scenario.key
 
     for _, row in events.iterrows():
-        radius_km = _effective_radius(row, scenario, urban_fips)
-        duration_h = float(row["duration_hours"]) * float(scenario.duration_scale)
+        radius_km = _effective_radius(row, scenario)
+        duration_h = float(row["duration_hours"])
         epicenter = (float(row["epicenter_lat"]), float(row["epicenter_lon"]))
 
         (
@@ -387,35 +376,15 @@ def resolve_graph_for_scenario(
     G_base: nx.Graph,
     unit: str,
     densify_cache: Path,
-    k5km_pkl: Path | None,
-    densify_seed: int = 42,
-    member_state_abbrs: list[str] | None = None,
-) -> tuple[nx.Graph | None, str]:
-    """
-    Return (graph, note). None graph → skip scenario (e.g. missing 5 km pickle).
-
-    Densified graphs are built from the existing baseline 10 km pickle (G_base);
-    they are never used for epicenter sampling.
-    """
-    if scenario.network_variant == "base_10km":
-        return G_base, "base_10km"
-    if scenario.network_variant == "k5km":
-        if k5km_pkl is None or not k5km_pkl.is_file():
-            return None, "missing_k5km"
-        return load_network(k5km_pkl), "k5km"
-    if scenario.densify_pct is not None and scenario.densify_mode:
-        H, _meta = load_or_build_densified(
-            G_base,
-            unit,
-            scenario.densify_pct,
-            scenario.densify_mode,
-            densify_cache,
-            seed=int(getattr(scenario, "densify_seed", densify_seed)),
-            replicate=getattr(scenario, "densify_replicate", None),
-            member_state_abbrs=member_state_abbrs,
-        )
-        return H, scenario.network_variant
-    return G_base, scenario.network_variant
+    unit_boundary,
+) -> tuple[nx.Graph, str, dict]:
+    """Return the baseline or cached corridor-expanded graph."""
+    if scenario.densify_pct is None:
+        return G_base, "base_10km", {}
+    graph, meta = load_or_build_densified(
+        G_base, unit, scenario.densify_pct, densify_cache, boundary=unit_boundary
+    )
+    return graph, scenario.network_variant, meta
 
 
 def _git_commit(project_root: Path) -> str:
@@ -446,7 +415,7 @@ def run_unit_batch1(
     n_sims: int = 100,
     project_root: Path,
     densify_cache: Path,
-    k5km_pkl: Path | None = None,
+    k5km_pkl: Path | None = None,  # retained for the legacy A/B runner
     bootstrap_pool: str = "all",
     outage_year: int | None = None,
     force: bool = False,
@@ -471,11 +440,6 @@ def run_unit_batch1(
 
     G_base = load_network(pkl_path)
     target_states = list(member_states) if member_states else [label]
-    member_abbrs: list[str] = []
-    for s in target_states:
-        if STATE_NAME_TO_ABBR.get(s) is None:
-            raise ValueError(f"No abbr mapping for {s}")
-        member_abbrs.append(STATE_NAME_TO_ABBR[s])
 
     county_post_df, flat_lam = load_posterior()
     outages_df = pd.read_csv(
@@ -484,8 +448,23 @@ def run_unit_batch1(
     county_geom_mcc = load_county_geometry_and_mcc(project_root)
     cov_df = load_coverage_history(project_root)
     county_polys = load_county_polygons(project_root)
+    if county_polys.crs is not None:
+        county_polys = county_polys.to_crs(4326)
     poly_dict = {row["fips_str"]: row["geometry"] for _, row in county_polys.iterrows()}
-    urban_fips = urban_fips_from_mcc(county_geom_mcc, top_frac=0.25)
+    target_fips = set(
+        county_post_df.loc[county_post_df["state"].isin(target_states), "fips"]
+        .astype(int)
+        .astype(str)
+        .str.zfill(5)
+    )
+    unit_geometry = county_polys[county_polys["fips_str"].isin(target_fips)].geometry
+    if unit_geometry.empty:
+        raise ValueError(f"No county boundary found for {unit}")
+    unit_boundary = (
+        unit_geometry.union_all()
+        if hasattr(unit_geometry, "union_all")
+        else unit_geometry.unary_union
+    )
     pop_gdf = (
         require_pop_units(project_root)
         if (epicenter_mode or "population").lower() == "population"
@@ -495,38 +474,30 @@ def run_unit_batch1(
     # Preload / build graphs + cache E(G)
     # Epicenters always drawn once per sim (population/KDE on G_base); densified
     # graphs only for loss evaluation.
-    graph_cache: dict[str, tuple[nx.Graph, float]] = {}
+    graph_cache: dict[str, tuple[nx.Graph, float, dict]] = {}
     scenario_variants: dict[str, str] = {}
-    skip_keys: set[str] = set()
     for sc in scenarios:
-        G_sc, note = resolve_graph_for_scenario(
+        G_sc, variant, meta = resolve_graph_for_scenario(
             sc,
             G_base=G_base,
             unit=unit,
             densify_cache=densify_cache,
-            k5km_pkl=k5km_pkl,
-            member_state_abbrs=member_abbrs,
+            unit_boundary=unit_boundary,
         )
-        if G_sc is None:
-            skip_keys.add(sc.key)
-            print(f"[skip-scenario] {unit} {sc.key}: {note}", flush=True)
-            continue
-        variant = note
         scenario_variants[sc.key] = variant
         if variant not in graph_cache:
             try:
                 E0 = float(nx.global_efficiency(G_sc))
             except Exception:
                 E0 = 0.0
-            graph_cache[variant] = (G_sc, E0)
+            graph_cache[variant] = (G_sc, E0, meta)
 
-    active = [s for s in scenarios if s.key not in skip_keys]
-    if not active:
+    if not scenarios:
         return f"empty-scenarios:{unit}"
 
     crn_rows: list[pd.DataFrame] = []
-    metrics_by_sc: dict[str, list[dict]] = {s.key: [] for s in active}
-    events_by_sc: dict[str, list[pd.DataFrame]] = {s.key: [] for s in active}
+    metrics_by_sc: dict[str, list[dict]] = {s.key: [] for s in scenarios}
+    events_by_sc: dict[str, list[pd.DataFrame]] = {s.key: [] for s in scenarios}
     # Shared removal cache for the unit; keys include graph_id (network variant).
     from collections import OrderedDict
 
@@ -570,15 +541,14 @@ def run_unit_batch1(
                 ].rename(columns={"year": "year_hist"})
             )
 
-        for sc in active:
+        for sc in scenarios:
             variant = scenario_variants[sc.key]
-            G_use, E0 = graph_cache[variant]
+            G_use, E0, _ = graph_cache[variant]
             ev = evaluate_events_on_graph(
                 events=events,
                 G=G_use,
                 E0=E0,
                 scenario=sc,
-                urban_fips=urban_fips,
                 removal_cache=removal_cache,
                 graph_id=variant,
             )
@@ -589,7 +559,7 @@ def run_unit_batch1(
         if (sim_id + 1) % 5 == 0 or (sim_id + 1) == n_sims:
             elapsed = time.time() - t0
             print(
-                f"[{os.environ.get('ATTACK_RUN_LABEL', 'CF-B1')}] "
+                "[Interventions] "
                 f"{label} {sim_id+1}/{n_sims} "
                 f"({100*(sim_id+1)/n_sims:.0f}%) elapsed {elapsed/60:.1f} min",
                 flush=True,
@@ -605,7 +575,7 @@ def run_unit_batch1(
 
     summary_rows: list[dict] = []
     baseline_mean = None
-    for sc in active:
+    for sc in scenarios:
         mdf = pd.DataFrame(metrics_by_sc[sc.key])
         mdf.to_csv(unit_out / f"metrics_{sc.key}.csv", index=False)
         if write_events and events_by_sc[sc.key]:
@@ -646,20 +616,10 @@ def run_unit_batch1(
             row["delta_L_tilde"] = float("nan")
             row["delta_L_tilde_pct"] = float("nan")
 
-    # Collect placement metadata, including strict-corridor shortfalls.
-    densify_metas: dict[str, dict] = {}
-    for sc in active:
-        if sc.densify_pct is not None and sc.densify_mode:
-            _G, meta = load_or_build_densified(
-                G_base,
-                unit,
-                sc.densify_pct,
-                sc.densify_mode,
-                densify_cache,
-                seed=int(getattr(sc, "densify_seed", 42)),
-                replicate=getattr(sc, "densify_replicate", None),
-                member_state_abbrs=member_abbrs,
-            )
+    densify_metas = {}
+    for sc in scenarios:
+        if sc.densify_pct is not None:
+            meta = graph_cache[scenario_variants[sc.key]][2]
             densify_metas[sc.key] = {
                 k: meta.get(k)
                 for k in (
@@ -671,9 +631,6 @@ def run_unit_batch1(
                     "n_base",
                     "n_shortfall",
                     "realized_pct",
-                    "intervention",
-                    "note",
-                    "replicate",
                 )
                 if k in meta or k in ("n_nevi", "n_target", "n_added", "n_shortfall")
             }
@@ -695,8 +652,7 @@ def run_unit_batch1(
             "SeedSequence(sim_id).spawn(4): independent posterior, event-count, "
             "bootstrap, and epicenter streams"
         ),
-        "scenarios": [s.key for s in active],
-        "skipped_scenarios": sorted(skip_keys),
+        "scenarios": [s.key for s in scenarios],
         "pkl_path": str(pkl_path),
         "densify_cache": str(densify_cache),
         "densify_meta_keys": sorted(densify_metas.keys()),

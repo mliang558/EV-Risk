@@ -1,74 +1,43 @@
-# Batch 1 intervention experiment
+# 2023 intervention experiments
 
-This package tests a mitigation question using the 2023 network, pooled 2018-2023
-outages, and common random numbers across scenarios. It does not replace or modify the
-canonical state-ranking analysis.
+This package compares two one-at-a-time interventions on the validated 2023
+network. Every Monte Carlo replication uses the same pooled 2018–2023 outage
+draw across the baseline and all intervention doses.
 
-## Retained design
+- **Corridor expansion (`CF-D`)** adds eligible Interstate-corridor hypernodes
+  at target doses of 10%, 20%, 30%, and 50%. Candidates are sampled every 50
+  miles and must remain at least 10 km from existing and newly added nodes.
+  The complete Voronoi network is rebuilt after placement. Corridor shortfalls
+  are reported and are never filled with off-corridor sites.
+- **Severity reduction (`CF-S`)** reduces affected customers by the same doses,
+  then reapplies coverage correction, the county-customer cap, and the radius
+  calculation.
 
-| Family | Doses | Role |
-| --- | --- | --- |
-| `baseline` | 0 | Reference |
-| `CF-D` | 0, 10, 20, 30, 50% | NEVI-style Interstate corridor node expansion |
-| `CF-S` | 0, 10, 20, 30, 50% | Reduction in customers affected per event |
-| `CF-D-pop` | 10, 20, 30, 50% | Optional population-placement appendix control |
-| `CF-D-null` | 10, 20, 30, 50%, 10 replicates | Optional uniform-placement appendix control |
-
-The default run is `baseline,CF-D,CF-S`. Population and uniform controls must be
-requested explicitly. Urban-radius, 5 km network, within-cluster, and duration scenarios
-are not part of the active manuscript workflow.
-
-For CF-S, the affected-customer count is multiplied by `1 - dose` before the
-coverage adjustment and county-customer cap are reapplied. The disruption radius
-is then recomputed from that counterfactual customer count.
-
-## Environment
+Run the input check, a two-simulation smoke test, and then the full experiment:
 
 ```bash
-cd /opt/data_repo/mliang_work/EV-Risk-review
-pip install -r analysis/attack_under_PO/counterfactual_batch1/requirements-batch1.txt
-python -c "import arviz, geopandas, networkx, xarray, netCDF4, shapely, scipy, pandas, numpy; print('environment OK')"
-export PYTHONPATH="$PWD/analysis:$PWD/analysis/attack_under_PO"
-export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1
+python -u analysis/attack_under_PO/counterfactual_batch1/run_batch1_parallel.py --check-only
+
+python -u analysis/attack_under_PO/counterfactual_batch1/run_batch1_parallel.py \
+  --only VT --n-sims 2 --workers 1 \
+  --out results_interventions_1029_smoke_VT
+
+python -u analysis/attack_under_PO/counterfactual_batch1/smoke_test_batch1.py \
+  --batch-dir results_interventions_1029_smoke_VT --unit VT
+
+nohup python -u analysis/attack_under_PO/counterfactual_batch1/run_batch1_parallel.py \
+  --out results_interventions_1029_network2023_pooled2018_2023_n100 \
+  --n-sims 100 --workers 45 --no-events \
+  > results_review/logs/interventions_1029.log 2>&1 &
 ```
 
-The population epicenter file and interstate shapefile must already exist. See
-`../GEOGRAPHY_FIPS_LOCK.md` for the locked geography definitions.
-
-## Recommended execution
-
-Run the two retained intervention experiments directly with Python. The same
-pooled Bayesian outage draw is reused across the baseline and every dose in a
-Monte Carlo replication.
-
-```bash
-python -u analysis/attack_under_PO/counterfactual_batch1/run_batch1_parallel.py --families baseline,CF-D,CF-S --check-only
-
-python -u analysis/attack_under_PO/counterfactual_batch1/run_batch1_parallel.py --network-root outputs/1029-network-data-preprocessing-10km-geodesic-2018-2023 --network-year 2023 --densify-cache outputs/1029-network-nevi-expansion-2023 --out results_interventions_1029_network2023_pooled2018_2023 --families baseline,CF-D,CF-S --n-sims 100 --workers 45 --no-events
-```
-
-For a quick TX smoke test, add `--only TX --n-sims 2 --workers 1` and use a
-separate output directory.
-
-## Analysis
+Analyze the completed run with:
 
 ```bash
 python analysis/attack_under_PO/counterfactual_batch1/analyze_dose_response.py \
-  --batch-dir results_interventions_1029_network2023_pooled2018_2023
-
-python analysis/attack_under_PO/counterfactual_batch1/audit_cf_d_denominator.py \
-  --batch-dir results_interventions_1029_network2023_pooled2018_2023
+  --batch-dir results_interventions_1029_network2023_pooled2018_2023_n100
 ```
 
-The first command requires exactly five unique doses for CF-D and CF-S. The second
-reports both node-normalized loss `L` and total loss `W = L * scenario node count`.
-
-## Interpretation locks
-
-- The graph is spatially constructed but global efficiency is unweighted.
-- CF-D means NEVI-style corridor expansion, not exact NEVI compliance.
-- New nodes are outage targets but never outage epicenters.
-- CF-D never fills corridor shortfalls with off-corridor population sites;
-  achieved node additions and shortfalls are recorded for every unit and dose.
-- Report both `L` and `W`; adding nodes mechanically changes the denominator of `L`.
-- Placement controls support a relative comparison only after their full results exist.
+The analysis reports both the intervention curves and unit-level slopes. The
+network metric remains unweighted global efficiency with the canonical fixed
+original-node denominator after each independent event.

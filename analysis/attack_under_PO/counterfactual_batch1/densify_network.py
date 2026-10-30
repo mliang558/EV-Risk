@@ -1,24 +1,4 @@
-#!/usr/bin/env python3
-"""
-CF-D coverage expansion: add hypernodes OUTSIDE existing 10 km cluster footprints.
-
-Placement rules (all enforce min distance ≥ cluster_radius_m to existing hypernodes)
-------------------------------------------------------------------------------------
-nevi     : PRIMARY — candidates every 50 miles along interstate corridors;
-           exclude sites < 10 km from existing and newly added hypernodes; at
-           each dose take the largest-gap sites first.
-pop      : population-weighted rejection sampling in unit counties (demand-oriented).
-uniform  : uniform in unit counties (null / spatial control); use seed replicates.
-
-Capacity is irrelevant: global efficiency is topology-only. Within-cluster densify /
-EVSE upgrades are beyond model resolution (see densify_within).
-
-Base graphs are not regenerated from stations. Counterfactual nodes are added
-to the validated 2023 canonical graph and all Voronoi edges are then rebuilt.
-
-Cached pickles:
-  outputs/network_graph_cf_densify_2023/{nevi,pop,uniform}_p{pct}[_r{k}]/network_structures/
-"""
+"""Add eligible Interstate-corridor hypernodes and rebuild the network."""
 
 from __future__ import annotations
 
@@ -26,10 +6,14 @@ import hashlib
 import json
 import pickle
 from pathlib import Path
-from typing import Any
+import sys
 
 import networkx as nx
 import numpy as np
+
+ANALYSIS = Path(__file__).resolve().parents[3] / "analysis"
+if str(ANALYSIS) not in sys.path:
+    sys.path.insert(0, str(ANALYSIS))
 
 from analysis.build_charging_network_step2 import (
     WGS84_GEOD,
@@ -38,731 +22,258 @@ from analysis.build_charging_network_step2 import (
     voronoi_adjacency,
 )
 
-
-DEFAULT_CLUSTER_RADIUS_M = 10_000.0
-NEVI_SPACING_M = 50.0 * 1609.344  # 50 miles — NEVI corridor spacing
-NULL_REPLICATES = 10
-CACHE_SCHEMA = "strict_corridor_local_aeqd_geodesic_v1"
-
-# Sibling of Pro_directory (EV_Project) — highway + county assets live here
-_EV_PROJECT = Path(__file__).resolve().parents[4]
-_PRO_ROOT = Path(__file__).resolve().parents[3]
+CLUSTER_RADIUS_M = 10_000.0
+CORRIDOR_SPACING_M = 50 * 1609.344
+CACHE_SCHEMA = "interstate_50mi_10km_unit_boundary_v2"
+ROOT = Path(__file__).resolve().parents[3]
+EV_PROJECT = Path(__file__).resolve().parents[4]
 
 
-def _node_coords(G: nx.Graph) -> tuple[np.ndarray, list]:
-    nodes = list(G.nodes())
-    coords = np.zeros((len(nodes), 2), dtype=float)
-    for i, n in enumerate(nodes):
-        d = G.nodes[n]
-        if "location" in d and d["location"] is not None:
-            lat, lon = d["location"]
-        else:
-            lat, lon = d.get("lat"), d.get("lon")
-        coords[i] = (float(lat), float(lon))
-    return coords, nodes
+def _node_coords(graph: nx.Graph) -> tuple[np.ndarray, list]:
+    nodes = list(graph.nodes)
+    coords = []
+    for node in nodes:
+        data = graph.nodes[node]
+        lat, lon = data.get("location", (data.get("lat"), data.get("lon")))
+        coords.append((float(lat), float(lon)))
+    return np.asarray(coords), nodes
 
 
-def _graph_signature(G: nx.Graph) -> str:
-    """Stable geometry signature used to reject stale counterfactual caches."""
-    coords, _ = _node_coords(G)
-    rounded = np.round(coords, decimals=10)
-    if len(rounded):
-        rounded = rounded[np.lexsort((rounded[:, 1], rounded[:, 0]))]
-    digest = hashlib.sha256(rounded.astype("<f8", copy=False).tobytes()).hexdigest()
-    return f"n={len(rounded)};sha256={digest}"
+def _graph_signature(graph: nx.Graph) -> str:
+    coords, _ = _node_coords(graph)
+    coords = np.round(coords, 10)
+    coords = coords[np.lexsort((coords[:, 1], coords[:, 0]))]
+    digest = hashlib.sha256(coords.astype("<f8", copy=False).tobytes()).hexdigest()
+    return f"n={len(coords)};sha256={digest}"
 
 
-def _rebuild_edges(G: nx.Graph) -> nx.Graph:
-    """Rebuild edges using the canonical projection and distance definitions."""
-    coords_ll, nodes = _node_coords(G)
-    coords_m, projection = _to_local_aeqd_meters(coords_ll)
-    if len(nodes) < 4:
-        adj = {(i, j) for i in range(len(nodes)) for j in range(i + 1, len(nodes))}
-        adjacency_method = "complete_small"
-    else:
-        adj = voronoi_adjacency(coords_m)
-        adjacency_method = "voronoi_local_aeqd"
-    dist = _geodesic_distance_matrix(coords_ll)
-    dmax = float(dist.max()) if dist.size else 1.0
-    if dmax <= 0:
-        dmax = 1.0
-    H = nx.Graph(**dict(G.graph))
-    for n in nodes:
-        H.add_node(n, **dict(G.nodes[n]))
-    for a, b in adj:
-        na, nb = nodes[a], nodes[b]
-        d_m = float(dist[a, b])
-        H.add_edge(na, nb, weight=d_m / dmax, distance_m=d_m)
-    H.graph.update(
-        {
-            "adjacency": adjacency_method,
-            "voronoi_crs": projection,
-            "distance_method": "WGS84_geodesic",
-        }
+def _rebuild_edges(graph: nx.Graph) -> nx.Graph:
+    """Use the same topology and distance definitions as the canonical network."""
+    coords, nodes = _node_coords(graph)
+    projected, projection = _to_local_aeqd_meters(coords)
+    adjacency = (
+        {(i, j) for i in range(len(nodes)) for j in range(i + 1, len(nodes))}
+        if len(nodes) < 4
+        else voronoi_adjacency(projected)
     )
-    if nodes and not nx.is_connected(H):
-        raise RuntimeError("Counterfactual Voronoi graph is disconnected")
-    return H
+    distances = _geodesic_distance_matrix(coords)
+    max_distance = max(float(distances.max()), 1.0)
+
+    rebuilt = nx.Graph(**graph.graph)
+    rebuilt.add_nodes_from((node, dict(graph.nodes[node])) for node in nodes)
+    for i, j in adjacency:
+        distance = float(distances[i, j])
+        rebuilt.add_edge(
+            nodes[i], nodes[j], distance_m=distance, weight=distance / max_distance
+        )
+    rebuilt.graph.update(
+        voronoi_crs=projection,
+        adjacency="complete_small" if len(nodes) < 4 else "voronoi_local_aeqd",
+        distance_method="WGS84_geodesic",
+    )
+    if nodes and not nx.is_connected(rebuilt):
+        raise RuntimeError("Counterfactual network is disconnected")
+    return rebuilt
 
 
-def _add_cf_nodes(
-    G: nx.Graph,
-    lats: list[float],
-    lons: list[float],
+def resolve_interstate_shapefile() -> Path:
+    candidates = (
+        EV_PROJECT / "Highway" / "us_interstate_highways.shp" / "us_interstate_highways.shp",
+        EV_PROJECT / "Highway" / "us_interstate_highways.shp",
+        EV_PROJECT / "PrimaryRoads" / "tl_2022_us_primaryroads" / "tl_2022_us_primaryroads.shp",
+        ROOT / "data" / "raw" / "us_interstate_highways.shp",
+    )
+    for path in candidates:
+        if path.is_file():
+            return path
+    tried = "\n  ".join(map(str, candidates))
+    raise FileNotFoundError(f"Interstate shapefile not found. Tried:\n  {tried}")
+
+
+def _interstates_near(graph: nx.Graph, boundary=None):
+    import geopandas as gpd
+    from shapely.geometry import box
+
+    if boundary is None:
+        coords, _ = _node_coords(graph)
+        lat_min, lon_min = coords.min(axis=0)
+        lat_max, lon_max = coords.max(axis=0)
+        boundary = box(lon_min - 0.35, lat_min - 0.35, lon_max + 0.35, lat_max + 0.35)
+
+    roads = gpd.read_file(resolve_interstate_shapefile())
+    roads = roads.set_crs(4326) if roads.crs is None else roads.to_crs(4326)
+    if "RTTYP" in roads:
+        interstate = roads[roads["RTTYP"].astype(str).str.upper() == "I"]
+        if not interstate.empty:
+            roads = interstate
+    elif {"MTFCC", "FULLNAME"}.issubset(roads.columns):
+        mask = roads["FULLNAME"].astype(str).str.contains(
+            r"I-|Interstate", case=False, na=False
+        )
+        if mask.any():
+            roads = roads[mask]
+    roads = roads[roads.intersects(boundary)].copy()
+    roads["geometry"] = roads.geometry.intersection(boundary)
+    return roads[~roads.geometry.is_empty]
+
+
+def _corridor_candidates(roads, spacing_m: float) -> np.ndarray:
+    """Sample route points in a local equidistant projection."""
+    import geopandas as gpd
+    from shapely.geometry import Point
+
+    if roads.empty:
+        return np.empty((0, 2))
+    roads = roads.to_crs(4326)
+    union = (
+        roads.geometry.union_all()
+        if hasattr(roads.geometry, "union_all")
+        else roads.geometry.unary_union
+    )
+    center = union.centroid
+    projection = (
+        f"+proj=aeqd +lat_0={center.y:.12f} +lon_0={center.x:.12f} "
+        "+datum=WGS84 +units=m +no_defs"
+    )
+    projected = roads.to_crs(projection)
+    points = []
+    for geometry in projected.geometry:
+        lines = [geometry] if geometry.geom_type == "LineString" else list(geometry.geoms)
+        for line in lines:
+            distances = np.arange(0, line.length + 1, spacing_m)
+            points.extend(line.interpolate(min(d, line.length)) for d in distances)
+    if not points:
+        return np.empty((0, 2))
+    points = gpd.GeoSeries(points, crs=projection).to_crs(4326)
+    return np.column_stack((points.y, points.x))
+
+
+def _minimum_distances(candidates: np.ndarray, references: np.ndarray) -> np.ndarray:
+    if not len(candidates):
+        return np.empty(0)
+    if not len(references):
+        return np.full(len(candidates), np.inf)
+
+    result = np.empty(len(candidates))
+    for start in range(0, len(candidates), 500):
+        chunk = candidates[start : start + 500]
+        n_chunk, n_ref = len(chunk), len(references)
+        _, _, distance = WGS84_GEOD.inv(
+            np.repeat(chunk[:, 1], n_ref),
+            np.repeat(chunk[:, 0], n_ref),
+            np.tile(references[:, 1], n_chunk),
+            np.tile(references[:, 0], n_chunk),
+        )
+        result[start : start + n_chunk] = np.asarray(distance).reshape(n_chunk, n_ref).min(1)
+    return result
+
+
+def _select_sites(
+    candidates: np.ndarray,
+    existing: np.ndarray,
+    target: int,
+    min_distance_m: float,
+) -> tuple[np.ndarray, int]:
+    """Take largest-gap candidates while enforcing spacing from every chosen site."""
+    initial_distance = _minimum_distances(candidates, existing)
+    eligible = np.flatnonzero(initial_distance >= min_distance_m)
+    order = eligible[np.argsort(-initial_distance[eligible])]
+    selected = []
+    occupied = existing.copy()
+    for index in order:
+        point = candidates[index : index + 1]
+        if _minimum_distances(point, occupied)[0] < min_distance_m:
+            continue
+        selected.append(point[0])
+        occupied = np.vstack((occupied, point))
+        if len(selected) == target:
+            break
+    sites = np.asarray(selected) if selected else np.empty((0, 2))
+    return sites, len(eligible)
+
+
+def build_corridor_network(
+    graph: nx.Graph,
+    pct: float,
     *,
-    prefix: str,
-    rule: str,
-) -> nx.Graph:
-    """Attach new hypernodes (capacity placeholder only). Tag is_cf_added=True."""
-    H = G.copy()
-    for i, (lat, lon) in enumerate(zip(lats, lons)):
-        nid = f"{prefix}_{i}"
-        H.add_node(
-            nid,
+    boundary=None,
+    cluster_radius_m: float = CLUSTER_RADIUS_M,
+    spacing_m: float = CORRIDOR_SPACING_M,
+) -> tuple[nx.Graph, dict]:
+    existing, _ = _node_coords(graph)
+    target = int(np.ceil(pct * len(existing))) if pct > 0 else 0
+    candidates = _corridor_candidates(_interstates_near(graph, boundary), spacing_m)
+    sites, eligible_count = _select_sites(
+        candidates, existing, target, cluster_radius_m
+    )
+
+    expanded = graph.copy()
+    for index, (lat, lon) in enumerate(sites):
+        expanded.add_node(
+            f"cf_nevi_{index}",
             lat=float(lat),
             lon=float(lon),
             location=(float(lat), float(lon)),
-            capacity=1.0,
             n_stations=1,
-            n_l1=0.0,
-            n_l2=0.0,
-            n_dc=0.0,
-            densify_mode=rule,
-            coverage_expansion=True,
-            is_cf_added=True,  # never eligible as epicenter
+            is_cf_added=True,
         )
-    return _rebuild_edges(H)
-
-
-def _n_target(n0: int, pct: float) -> int:
-    if pct <= 0:
-        return 0
-    return max(1, int(np.ceil(pct * n0)))
-
-
-# ---------------------------------------------------------------------------
-# GIS helpers (lazy imports — geopandas / shapely)
-# ---------------------------------------------------------------------------
-
-def resolve_interstate_shapefile() -> Path:
-    candidates = [
-        _EV_PROJECT / "Highway" / "us_interstate_highways.shp" / "us_interstate_highways.shp",
-        _EV_PROJECT / "Highway" / "us_interstate_highways.shp",
-        _EV_PROJECT / "PrimaryRoads" / "tl_2022_us_primaryroads" / "tl_2022_us_primaryroads.shp",
-        _PRO_ROOT / "data" / "raw" / "us_interstate_highways.shp",
-    ]
-    for p in candidates:
-        if p.is_file():
-            return p
-    raise FileNotFoundError(
-        "Interstate / AFC corridor shapefile not found. Tried:\n  "
-        + "\n  ".join(str(c) for c in candidates)
-    )
-
-
-def resolve_county_pop_csv() -> Path:
-    candidates = [
-        _PRO_ROOT
-        / "analysis"
-        / "attack_under_PO"
-        / "module_3_03"
-        / "demographic data"
-        / "merged_output.csv",
-        _EV_PROJECT / "processed_county_population.csv",
-    ]
-    for p in candidates:
-        if p.is_file():
-            return p
-    raise FileNotFoundError("County population CSV not found.")
-
-
-def resolve_county_shapefile() -> Path:
-    from compute_impact_radius import resolve_county_shapefile as _res
-
-    return _res(_PRO_ROOT)
-
-
-def _bbox_from_graph(G: nx.Graph, pad_deg: float = 0.35) -> tuple[float, float, float, float]:
-    coords, _ = _node_coords(G)
-    lat_min, lon_min = coords.min(axis=0)
-    lat_max, lon_max = coords.max(axis=0)
-    return (
-        float(lon_min - pad_deg),
-        float(lat_min - pad_deg),
-        float(lon_max + pad_deg),
-        float(lat_max + pad_deg),
-    )
-
-
-def _load_interstate_clipped(bbox: tuple[float, float, float, float]):
-    import geopandas as gpd
-    from shapely.geometry import box
-
-    path = resolve_interstate_shapefile()
-    gdf = gpd.read_file(path)
-    if gdf.crs is None:
-        gdf = gdf.set_crs(4326)
-    gdf = gdf.to_crs(4326)
-    # Prefer true interstates when TIGER primary roads are used
-    if "RTTYP" in gdf.columns:
-        inter = gdf[gdf["RTTYP"].astype(str).str.upper() == "I"]
-        if len(inter) > 0:
-            gdf = inter
-    elif "MTFCC" in gdf.columns and "FULLNAME" in gdf.columns:
-        # keep Interstate-named S1100 segments
-        mask = gdf["FULLNAME"].astype(str).str.contains("I-|Interstate", case=False, na=False)
-        if mask.any():
-            gdf = gdf[mask]
-    clip = gpd.GeoDataFrame(geometry=[box(*bbox)], crs="EPSG:4326")
-    try:
-        out = gpd.clip(gdf, clip)
-    except Exception:
-        out = gdf[gdf.intersects(clip.geometry.iloc[0])]
-    return out
-
-
-def _load_unit_counties(G: nx.Graph, member_state_abbrs: list[str] | None):
-    """Counties overlapping the unit bbox, optionally filtered by state abbr."""
-    import geopandas as gpd
-    import pandas as pd
-    from shapely.geometry import box
-
-    # STATEFP (2-digit) → postal abbr (TIGER counties have STATEFP, not STUSPS)
-    _FIPS_TO_ABBR = {
-        "01": "AL", "02": "AK", "04": "AZ", "05": "AR", "06": "CA", "08": "CO",
-        "09": "CT", "10": "DE", "11": "DC", "12": "FL", "13": "GA", "15": "HI",
-        "16": "ID", "17": "IL", "18": "IN", "19": "IA", "20": "KS", "21": "KY",
-        "22": "LA", "23": "ME", "24": "MD", "25": "MA", "26": "MI", "27": "MN",
-        "28": "MS", "29": "MO", "30": "MT", "31": "NE", "32": "NV", "33": "NH",
-        "34": "NJ", "35": "NM", "36": "NY", "37": "NC", "38": "ND", "39": "OH",
-        "40": "OK", "41": "OR", "42": "PA", "44": "RI", "45": "SC", "46": "SD",
-        "47": "TN", "48": "TX", "49": "UT", "50": "VT", "51": "VA", "53": "WA",
-        "54": "WV", "55": "WI", "56": "WY",
-    }
-
-    shp = resolve_county_shapefile()
-    gdf = gpd.read_file(shp)
-    if gdf.crs is None:
-        gdf = gdf.set_crs(4269)
-    gdf = gdf.to_crs(4326)
-    if "GEOID" in gdf.columns:
-        gdf["fips_str"] = gdf["GEOID"].astype(str).str.zfill(5)
-    else:
-        gdf["fips_str"] = (
-            gdf["STATEFP"].astype(str).str.zfill(2) + gdf["COUNTYFP"].astype(str).str.zfill(3)
-        )
-    bbox = _bbox_from_graph(G)
-    clip = box(*bbox)
-    gdf = gdf[gdf.intersects(clip)].copy()
-    if member_state_abbrs:
-        abbrs = {a.upper() for a in member_state_abbrs}
-        if "STUSPS" in gdf.columns:
-            gdf = gdf[gdf["STUSPS"].astype(str).str.upper().isin(abbrs)]
-        elif "STATEFP" in gdf.columns:
-            keep_fips = {k for k, v in _FIPS_TO_ABBR.items() if v in abbrs}
-            gdf = gdf[gdf["STATEFP"].astype(str).str.zfill(2).isin(keep_fips)]
-    # attach population
-    pop_path = resolve_county_pop_csv()
-    pop = pd.read_csv(pop_path, dtype={"fips": str})
-    if "fips" not in pop.columns and "fips_str" in pop.columns:
-        pop = pop.rename(columns={"fips_str": "fips"})
-    pop["fips"] = pop["fips"].astype(str).str.zfill(5)
-    pop_col = None
-    for c in ("POPESTIMATE2023", "POPESTIMATE2022", "POPESTIMATE2024", "population", "POP"):
-        if c in pop.columns:
-            pop_col = c
-            break
-    if pop_col is None:
-        raise ValueError(f"No population column in {pop_path}")
-    pop = pop[["fips", pop_col]].rename(columns={pop_col: "population"})
-    gdf = gdf.merge(pop, left_on="fips_str", right_on="fips", how="left")
-    gdf["population"] = gdf["population"].fillna(0).clip(lower=0)
-    return gdf
-
-
-def _sample_along_lines(
-    roads_gdf,
-    spacing_m: float = NEVI_SPACING_M,
-) -> np.ndarray:
-    """Return (N, 2) lat/lon candidates at approximate route-distance spacing."""
-    if roads_gdf is None or len(roads_gdf) == 0:
-        return np.zeros((0, 2), dtype=float)
-    roads_ll = roads_gdf.to_crs(4326)
-    center = roads_ll.geometry.unary_union.centroid
-    projection = (
-        f"+proj=aeqd +lat_0={float(center.y):.12f} "
-        f"+lon_0={float(center.x):.12f} +datum=WGS84 +units=m +no_defs"
-    )
-    roads_m = roads_ll.to_crs(projection)
-    pts: list[tuple[float, float]] = []
-    for geom in roads_m.geometry:
-        if geom is None or geom.is_empty:
-            continue
-        lines = [geom] if geom.geom_type == "LineString" else list(geom.geoms)
-        for line in lines:
-            length = float(line.length)
-            if length <= 0:
-                continue
-            n = max(1, int(np.floor(length / spacing_m)))
-            for i in range(n + 1):
-                d = min(i * spacing_m, length)
-                p = line.interpolate(d)
-                pts.append((p.x, p.y))
-    if not pts:
-        return np.zeros((0, 2), dtype=float)
-    arr_m = np.asarray(pts, dtype=float)
-    import geopandas as gpd
-    from shapely.geometry import Point
-
-    g = gpd.GeoDataFrame(
-        geometry=[Point(x, y) for x, y in arr_m], crs=projection
-    ).to_crs(4326)
-    return np.column_stack([g.geometry.y, g.geometry.x])  # lat, lon
-
-
-def _min_dist_m(cand_ll: np.ndarray, existing_ll: np.ndarray) -> np.ndarray:
-    """Minimum WGS84 geodesic distance from each candidate to references."""
-    cand_ll = np.asarray(cand_ll, dtype=float)
-    existing_ll = np.asarray(existing_ll, dtype=float)
-    if len(cand_ll) == 0:
-        return np.zeros(0, dtype=float)
-    if len(existing_ll) == 0:
-        return np.full(len(cand_ll), np.inf)
-    out = np.empty(len(cand_ll), dtype=float)
-    n_ref = len(existing_ll)
-    for i in range(0, len(cand_ll), 500):
-        sl = cand_ll[i : i + 500]
-        n_cand = len(sl)
-        _, _, distances = WGS84_GEOD.inv(
-            np.repeat(sl[:, 1], n_ref),
-            np.repeat(sl[:, 0], n_ref),
-            np.tile(existing_ll[:, 1], n_cand),
-            np.tile(existing_ll[:, 0], n_cand),
-        )
-        out[i : i + n_cand] = (
-            np.asarray(distances).reshape(n_cand, n_ref).min(axis=1)
-        )
-    return out
-
-
-def _greedy_select_by_gap(
-    cand_ll: np.ndarray,
-    existing_ll: np.ndarray,
-    n_take: int,
-    *,
-    min_dist_m: float,
-    mutual_min_m: float | None = None,
-) -> tuple[list[float], list[float], np.ndarray]:
-    """
-    Keep candidates with min_dist ≥ min_dist_m; take up to n_take largest gaps.
-    Optionally enforce mutual spacing among selected (default = min_dist_m).
-    """
-    if n_take <= 0 or len(cand_ll) == 0:
-        return [], [], np.zeros(0)
-    mutual = min_dist_m if mutual_min_m is None else mutual_min_m
-    dmin = _min_dist_m(cand_ll, existing_ll)
-    ok = np.where(dmin >= min_dist_m)[0]
-    if len(ok) == 0:
-        return [], [], dmin
-    order = ok[np.argsort(-dmin[ok])]  # largest gap first
-    chosen_idx: list[int] = []
-    chosen_ll = existing_ll.copy()
-    for idx in order:
-        if len(chosen_idx) >= n_take:
-            break
-        point = cand_ll[idx : idx + 1]
-        if len(chosen_ll):
-            if float(_min_dist_m(point, chosen_ll)[0]) < mutual:
-                continue
-        chosen_idx.append(int(idx))
-        chosen_ll = np.vstack([chosen_ll, point])
-    lats = [float(cand_ll[i, 0]) for i in chosen_idx]
-    lons = [float(cand_ll[i, 1]) for i in chosen_idx]
-    return lats, lons, dmin
-
-
-# ---------------------------------------------------------------------------
-# Placement rules
-# ---------------------------------------------------------------------------
-
-def densify_nevi(
-    G: nx.Graph,
-    pct: float,
-    *,
-    cluster_radius_m: float = DEFAULT_CLUSTER_RADIUS_M,
-    spacing_m: float = NEVI_SPACING_M,
-    member_state_abbrs: list[str] | None = None,
-    seed: int = 42,
-) -> tuple[nx.Graph, dict]:
-    """
-    NEVI corridor (main): every ``spacing_m`` along interstate, drop sites
-    within ``cluster_radius_m`` of existing hypernodes, take largest gaps.
-
-    Dose target = ceil(pct * |V|). Only Interstate candidates are admitted.
-    If eligible candidates run out, the shortfall is recorded rather than
-    filled with off-corridor locations.
-    """
-    coords_ll, nodes = _node_coords(G)
-    n0 = len(nodes)
-    n_add = _n_target(n0, pct)
-    if n_add == 0:
-        return G.copy(), {"n_added": 0, "mode": "nevi", "pct": pct, "n_target": 0}
-
-    bbox = _bbox_from_graph(G)
-    roads = _load_interstate_clipped(bbox)
-    cand_ll = _sample_along_lines(roads, spacing_m=spacing_m)
-    lats, lons, dmin = _greedy_select_by_gap(
-        cand_ll, coords_ll, n_add, min_dist_m=cluster_radius_m
-    )
-    n_nevi = len(lats)
-    n_short = max(0, n_add - n_nevi)
-
-    H = _add_cf_nodes(G, lats, lons, prefix="cf_nevi", rule="nevi")
-
-    meta = {
+    expanded = _rebuild_edges(expanded) if len(sites) else expanded
+    added = len(sites)
+    return expanded, {
         "mode": "nevi",
-        "intervention": "coverage_expansion_nevi",
         "pct": float(pct),
-        "n_base": n0,
-        "n_target": n_add,
-        "n_added": int(n_nevi),
-        "n_nevi": int(n_nevi),
-        "n_shortfall": int(n_short),
-        "realized_pct": float(n_nevi / n0) if n0 else 0.0,
-        "n_candidates": int(len(cand_ll)),
-        "n_candidates_eligible": int((dmin >= cluster_radius_m).sum()) if len(dmin) else 0,
+        "n_base": len(existing),
+        "n_target": target,
+        "n_added": added,
+        "n_nevi": added,
+        "n_shortfall": target - added,
+        "realized_pct": added / len(existing) if len(existing) else 0.0,
+        "n_candidates": len(candidates),
+        "n_candidates_eligible": eligible_count,
         "spacing_m": float(spacing_m),
         "cluster_radius_m": float(cluster_radius_m),
-        "interstate_shp": str(resolve_interstate_shapefile()),
-        "n_nodes": H.number_of_nodes(),
-        "n_edges": H.number_of_edges(),
-        "capacity_used_by_efficiency": False,
-        "seed": int(seed),
-        "note": (
-            "NEVI-style: points every 50 mi on interstate corridors; "
-            "exclude <10 km from existing and newly added hypernodes; "
-            "dose target = ceil(pct*|V|). Corridor shortfalls are reported "
-            "and never filled off-corridor."
-        ),
     }
-    return H, meta
 
 
-def densify_pop(
-    G: nx.Graph,
-    pct: float,
-    *,
-    cluster_radius_m: float = DEFAULT_CLUSTER_RADIUS_M,
-    member_state_abbrs: list[str] | None = None,
-    seed: int = 42,
-    max_tries_factor: int = 200,
-    n_add_exact: int | None = None,
-) -> tuple[nx.Graph, dict]:
-    """Population-weighted sampling in unit counties, >10 km from existing."""
-    from shapely.geometry import Point
-
-    coords_ll, nodes = _node_coords(G)
-    n0 = len(nodes)
-    n_add = int(n_add_exact) if n_add_exact is not None else _n_target(n0, pct)
-    if n_add <= 0:
-        return G.copy(), {"n_added": 0, "mode": "pop", "pct": pct}
-
-    rng = np.random.default_rng(seed)
-    counties = _load_unit_counties(G, member_state_abbrs)
-    weights = counties["population"].to_numpy(dtype=float)
-    if weights.sum() <= 0:
-        weights = np.ones(len(counties), dtype=float)
-    probs = weights / weights.sum()
-    existing_ll = coords_ll.copy()
-
-    lats: list[float] = []
-    lons: list[float] = []
-    tries = 0
-    max_tries = max(n_add * max_tries_factor, n_add * 50)
-    while len(lats) < n_add and tries < max_tries:
-        tries += 1
-        i = int(rng.choice(len(counties), p=probs))
-        poly = counties.geometry.iloc[i]
-        if poly is None or poly.is_empty:
-            continue
-        # rejection sample inside polygon
-        minx, miny, maxx, maxy = poly.bounds
-        for _ in range(40):
-            lon = float(rng.uniform(minx, maxx))
-            lat = float(rng.uniform(miny, maxy))
-            if not poly.contains(Point(lon, lat)):
-                continue
-            candidate_ll = np.asarray([[lat, lon]], dtype=float)
-            dmin = float(_min_dist_m(candidate_ll, existing_ll)[0])
-            if dmin < cluster_radius_m:
-                break
-            lats.append(lat)
-            lons.append(lon)
-            existing_ll = np.vstack([existing_ll, candidate_ll])
-            break
-
-    H = _add_cf_nodes(G, lats, lons, prefix="cf_pop", rule="pop")
-    meta = {
-        "mode": "pop",
-        "intervention": "coverage_expansion_pop",
-        "pct": float(pct),
-        "n_base": n0,
-        "n_added": len(lats),
-        "n_target": n_add,
-        "n_counties": int(len(counties)),
-        "cluster_radius_m": float(cluster_radius_m),
-        "seed": int(seed),
-        "tries": tries,
-        "n_nodes": H.number_of_nodes(),
-        "n_edges": H.number_of_edges(),
-        "capacity_used_by_efficiency": False,
-        "note": "Population-weighted sites in unit counties, >10 km from existing hypernodes.",
-    }
-    return H, meta
-
-
-def densify_uniform(
-    G: nx.Graph,
-    pct: float,
-    *,
-    cluster_radius_m: float = DEFAULT_CLUSTER_RADIUS_M,
-    member_state_abbrs: list[str] | None = None,
-    seed: int = 42,
-    max_tries_factor: int = 200,
-) -> tuple[nx.Graph, dict]:
-    """
-    Uniform spatial null inside unit counties (not statewide bbox — still
-    restricted to county polygons). Forests/deserts can be selected by design;
-    use as control only (typically 10 seed replicates).
-    """
-    from shapely.geometry import Point
-
-    coords_ll, nodes = _node_coords(G)
-    n0 = len(nodes)
-    n_add = _n_target(n0, pct)
-    if n_add == 0:
-        return G.copy(), {"n_added": 0, "mode": "uniform", "pct": pct}
-
-    rng = np.random.default_rng(seed)
-    counties = _load_unit_counties(G, member_state_abbrs)
-    # area-weighted for "uniform in space"
-    areas = counties.geometry.to_crs(3857).area.to_numpy(dtype=float)
-    areas = np.clip(areas, 0, None)
-    if areas.sum() <= 0:
-        areas = np.ones(len(counties), dtype=float)
-    probs = areas / areas.sum()
-    existing_ll = coords_ll.copy()
-
-    lats: list[float] = []
-    lons: list[float] = []
-    tries = 0
-    max_tries = max(n_add * max_tries_factor, n_add * 50)
-    while len(lats) < n_add and tries < max_tries:
-        tries += 1
-        i = int(rng.choice(len(counties), p=probs))
-        poly = counties.geometry.iloc[i]
-        if poly is None or poly.is_empty:
-            continue
-        minx, miny, maxx, maxy = poly.bounds
-        for _ in range(40):
-            lon = float(rng.uniform(minx, maxx))
-            lat = float(rng.uniform(miny, maxy))
-            if not poly.contains(Point(lon, lat)):
-                continue
-            candidate_ll = np.asarray([[lat, lon]], dtype=float)
-            dmin = float(_min_dist_m(candidate_ll, existing_ll)[0])
-            if dmin < cluster_radius_m:
-                break
-            lats.append(lat)
-            lons.append(lon)
-            existing_ll = np.vstack([existing_ll, candidate_ll])
-            break
-
-    H = _add_cf_nodes(G, lats, lons, prefix="cf_null", rule="uniform")
-    meta = {
-        "mode": "uniform",
-        "intervention": "coverage_expansion_null",
-        "pct": float(pct),
-        "n_base": n0,
-        "n_added": len(lats),
-        "n_target": n_add,
-        "cluster_radius_m": float(cluster_radius_m),
-        "seed": int(seed),
-        "tries": tries,
-        "n_nodes": H.number_of_nodes(),
-        "n_edges": H.number_of_edges(),
-        "capacity_used_by_efficiency": False,
-        "note": "Uniform null control inside county polygons; may land in low-demand areas.",
-    }
-    return H, meta
-
-
-def densify_within(
-    G: nx.Graph,
-    pct: float,
-    *,
-    seed: int = 42,
-) -> tuple[nx.Graph, dict]:
-    """Diagnostic only — topology unchanged (beyond 10 km resolution)."""
-    if pct <= 0:
-        return G.copy(), {"n_boosted": 0, "mode": "within", "pct": pct}
-
-    rng = np.random.default_rng(seed)
-    H = G.copy()
-    nodes = list(H.nodes())
-    n0 = len(nodes)
-    n_boost = max(1, int(np.ceil(pct * n0)))
-    chosen = rng.choice(nodes, size=min(n_boost, n0), replace=False)
-    for n in chosen:
-        H.nodes[n]["densify_mode"] = "within_diagnostic"
-        H.nodes[n]["n_stations"] = int(H.nodes[n].get("n_stations", 1) or 1) + 1
-    meta = {
-        "mode": "within",
-        "intervention": "beyond_model_resolution",
-        "pct": float(pct),
-        "n_base": n0,
-        "n_boosted": int(len(chosen)),
-        "n_nodes": H.number_of_nodes(),
-        "n_edges": H.number_of_edges(),
-        "seed": int(seed),
-        "note": (
-            "Within-cluster densification / capacity is beyond 10 km hypernode resolution; "
-            "topology unchanged so efficiency-based L is unchanged."
-        ),
-    }
-    return H, meta
-
-
-# Back-compat alias (old name "gap" → NEVI)
-def densify_gap(G: nx.Graph, pct: float, **kwargs: Any) -> tuple[nx.Graph, dict]:
-    return densify_nevi(G, pct, **kwargs)
-
-
-def densify_graph(
-    G: nx.Graph,
-    pct: float,
-    mode: str,
-    *,
-    cluster_radius_m: float = DEFAULT_CLUSTER_RADIUS_M,
-    seed: int = 42,
-    member_state_abbrs: list[str] | None = None,
-) -> tuple[nx.Graph, dict]:
-    mode = mode.lower().strip()
-    # aliases
-    if mode in ("gap", "nevi", "corridor", "afc"):
-        return densify_nevi(
-            G,
-            pct,
-            cluster_radius_m=cluster_radius_m,
-            member_state_abbrs=member_state_abbrs,
-            seed=seed,
-        )
-    if mode in ("pop", "population"):
-        return densify_pop(
-            G,
-            pct,
-            cluster_radius_m=cluster_radius_m,
-            member_state_abbrs=member_state_abbrs,
-            seed=seed,
-        )
-    if mode in ("uniform", "null", "random"):
-        return densify_uniform(
-            G,
-            pct,
-            cluster_radius_m=cluster_radius_m,
-            member_state_abbrs=member_state_abbrs,
-            seed=seed,
-        )
-    if mode == "within":
-        return densify_within(G, pct, seed=seed)
-    raise ValueError(f"Unknown densify mode: {mode!r}")
-
-
-def cache_path(
-    cache_root: Path,
-    mode: str,
-    pct: float,
-    unit: str,
-    *,
-    replicate: int | None = None,
-) -> Path:
-    tag = f"{mode}_p{int(round(pct * 100))}"
-    if replicate is not None and mode in ("uniform", "null", "random"):
-        tag = f"{tag}_r{int(replicate)}"
-    return cache_root / tag / "network_structures" / f"network_{unit}.pkl"
+def _cache_path(cache_root: Path, pct: float, unit: str) -> Path:
+    dose = int(round(100 * pct))
+    return cache_root / f"nevi_p{dose}" / "network_structures" / f"network_{unit}.pkl"
 
 
 def load_or_build_densified(
-    G: nx.Graph,
+    graph: nx.Graph,
     unit: str,
     pct: float,
-    mode: str,
     cache_root: Path,
     *,
-    cluster_radius_m: float = DEFAULT_CLUSTER_RADIUS_M,
-    seed: int = 42,
-    replicate: int | None = None,
-    member_state_abbrs: list[str] | None = None,
+    boundary=None,
+    cluster_radius_m: float = CLUSTER_RADIUS_M,
     force: bool = False,
 ) -> tuple[nx.Graph, dict]:
-    mode_norm = mode.lower().strip()
-    if mode_norm in ("gap", "corridor", "afc"):
-        mode_norm = "nevi"
-    if mode_norm in ("population",):
-        mode_norm = "pop"
-    if mode_norm in ("null", "random"):
-        mode_norm = "uniform"
-    path = cache_path(cache_root, mode_norm, pct, unit, replicate=replicate)
-    base_signature = _graph_signature(G)
+    """Load a compatible corridor network or rebuild and cache it."""
+    path = _cache_path(cache_root, pct, unit)
+    signature = _graph_signature(graph)
     if path.is_file() and not force:
-        with open(path, "rb") as f:
-            payload = pickle.load(f)
-        if isinstance(payload, dict) and "network" in payload:
-            meta = payload.get("meta", {}) or {}
-            cache_matches = (
-                meta.get("cache_schema") == CACHE_SCHEMA
-                and meta.get("base_graph_signature") == base_signature
-                and float(meta.get("cluster_radius_m", -1.0)) == float(cluster_radius_m)
-            )
-            if cache_matches:
-                meta_path = path.with_suffix(".meta.json")
-                if meta and not meta_path.is_file():
-                    try:
-                        meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
-                    except Exception:
-                        pass
-                return payload["network"], meta
-        print(f"[cache-rebuild] incompatible counterfactual cache: {path}", flush=True)
+        with path.open("rb") as file:
+            payload = pickle.load(file)
+        meta = payload.get("meta", {}) if isinstance(payload, dict) else {}
+        compatible = (
+            meta.get("cache_schema") == CACHE_SCHEMA
+            and meta.get("base_graph_signature") == signature
+            and meta.get("cluster_radius_m") == float(cluster_radius_m)
+        )
+        if compatible:
+            return payload["network"], meta
+        print(f"[cache-rebuild] incompatible cache: {path}", flush=True)
 
-    # For null replicates, fold replicate into seed
-    use_seed = int(seed)
-    if replicate is not None:
-        use_seed = int(seed) + 1000 * int(replicate)
-
-    H, meta = densify_graph(
-        G,
-        pct,
-        mode_norm,
-        cluster_radius_m=cluster_radius_m,
-        seed=use_seed,
-        member_state_abbrs=member_state_abbrs,
+    expanded, meta = build_corridor_network(
+        graph, pct, boundary=boundary, cluster_radius_m=cluster_radius_m
     )
-    meta.update(
-        {
-            "cache_schema": CACHE_SCHEMA,
-            "base_graph_signature": base_signature,
-            "cluster_radius_m": float(cluster_radius_m),
-        }
-    )
-    if replicate is not None:
-        meta["replicate"] = int(replicate)
+    meta.update(cache_schema=CACHE_SCHEMA, base_graph_signature=signature)
     path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "wb") as f:
-        pickle.dump({"network": H, "meta": meta}, f)
-    # Sidecar records the target, achieved corridor dose, and any shortfall.
-    meta_path = path.with_suffix(".meta.json")
-    try:
-        meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
-    except Exception:
-        pass
-    return H, meta
+    with path.open("wb") as file:
+        pickle.dump({"network": expanded, "meta": meta}, file)
+    path.with_suffix(".meta.json").write_text(
+        json.dumps(meta, indent=2), encoding="utf-8"
+    )
+    return expanded, meta

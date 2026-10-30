@@ -21,13 +21,23 @@ The runner checks that the event identities, counties, durations, radii, and
 event count are identical across replications. Use a new output directory so
 replay results cannot mix with the legacy lambda-bootstrap results.
 
+Run the experiment directly with Python. There is no shell wrapper or hidden
+environment-variable configuration:
+
 ```bash
-NETWORK_ROOT=$PWD/outputs/1029-network-data-preprocessing-10km-geodesic-2018-2023 \
-EVENT_MODE=replay FAMILIES="B" YEARS="2018 2019 2020 2021 2022 2023" \
-N_SIMS=100 WORKERS=45 NO_EVENTS=1 \
-OUT=$PWD/results_replay_B_1029 \
-bash analysis/attack_under_PO/batch2_yearly/run_cluster.sh
+python analysis/attack_under_PO/batch2_yearly/run_parallel.py --event-mode replay --experiments B --years 2018 2019 2020 2021 2022 2023 --network-root outputs/1029-network-data-preprocessing-10km-geodesic-2018-2023 --out results_replay_B_1029 --n-sims 100 --workers 45
 ```
+
+For a quick check before the full run:
+
+```bash
+python analysis/attack_under_PO/batch2_yearly/run_parallel.py --event-mode replay --experiments B --years 2022 2023 --only TX --network-root outputs/1029-network-data-preprocessing-10km-geodesic-2018-2023 --out results_replay_B_1029_smoke --n-sims 2 --workers 1
+```
+
+Completed outputs are skipped automatically. Add `--force` only when an
+existing result must intentionally be recomputed. Per-simulation event files
+are omitted by default; add `--write-events` only when they are needed for an
+event-level audit.
 
 Outputs include `batch_manifest.json`, `observed_event_counts.csv`, and one
 directory per network/outage-year combination. Each unit directory contains

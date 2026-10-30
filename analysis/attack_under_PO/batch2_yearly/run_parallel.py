@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Parallel launcher for the A/B/C temporal robustness experiments."""
+"""Run the A/B/C temporal robustness experiments.
+
+This Python file is the only command-line entry point for Batch 2.  It reads
+ordinary command-line arguments, validates them, and distributes independent
+analytical-unit jobs across local CPU workers.
+"""
 
 from __future__ import annotations
 
@@ -225,25 +230,75 @@ def _worker(args: tuple) -> str:
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Batch 2 yearly A/B/C parallel runner")
-    ap.add_argument("--network-root", type=str, default=str(DEFAULT_NETWORK_ROOT))
-    ap.add_argument("--out", type=str, default=str(DEFAULT_OUT))
-    ap.add_argument("--families", nargs="+", default=["A", "B", "C"])
-    ap.add_argument("--years", type=int, nargs="+", default=list(YEARS))
-    ap.add_argument("--n-sims", type=int, default=100)
-    ap.add_argument("--workers", type=int, default=None)
-    ap.add_argument("--only", type=str, default="")
-    ap.add_argument("--force", action="store_true")
+    ap = argparse.ArgumentParser(
+        description="Run temporal robustness experiments in parallel."
+    )
+    ap.add_argument(
+        "--network-root",
+        type=str,
+        default=str(DEFAULT_NETWORK_ROOT),
+        help="Folder containing one network subfolder per year.",
+    )
+    ap.add_argument(
+        "--out",
+        type=str,
+        default=str(DEFAULT_OUT),
+        help="New or existing output folder.",
+    )
+    ap.add_argument(
+        "--experiments",
+        "--families",
+        dest="families",
+        nargs="+",
+        default=["A", "B", "C"],
+        help=(
+            "A = matched network/outage year; B = fixed 2023 network with each "
+            "outage year; C = changing network with pooled outages"
+        ),
+    )
+    ap.add_argument(
+        "--years",
+        type=int,
+        nargs="+",
+        default=list(YEARS),
+        help="Outage/network years to include.",
+    )
+    ap.add_argument(
+        "--n-sims",
+        type=int,
+        default=100,
+        help="Monte Carlo replications per analytical unit.",
+    )
+    ap.add_argument(
+        "--workers",
+        type=int,
+        default=None,
+        help="Parallel workers; defaults to the available CPU count.",
+    )
+    ap.add_argument(
+        "--only",
+        type=str,
+        default="",
+        help="Optional comma-separated analytical units, for example TX,CA.",
+    )
+    ap.add_argument(
+        "--force",
+        action="store_true",
+        help="Recompute completed unit outputs instead of skipping them.",
+    )
     ap.add_argument(
         "--event-mode",
         choices=("lambda_bootstrap", "replay"),
         default="lambda_bootstrap",
-        help="replay uses every observed event once and randomizes only epicenters",
+        help=(
+            "replay uses every observed event once and redraws only its epicenter; "
+            "lambda_bootstrap retains the legacy sampling method"
+        ),
     )
     ap.add_argument(
         "--write-events",
         action="store_true",
-        help="Write per-sim event dumps (default off)",
+        help="Write large per-simulation event files (off by default).",
     )
     args = ap.parse_args()
 
@@ -296,6 +351,15 @@ def main() -> None:
     workers = args.workers if args.workers is not None else nproc
     workers = max(1, min(int(workers), max(len(jobs), 1)))
 
+    print("[Temporal robustness] configuration", flush=True)
+    print(f"  experiments : {', '.join(args.families)}", flush=True)
+    print(f"  years       : {', '.join(map(str, args.years))}", flush=True)
+    print(f"  event mode  : {args.event_mode}", flush=True)
+    print(f"  simulations : {args.n_sims}", flush=True)
+    print(f"  workers     : {workers}", flush=True)
+    print(f"  networks    : {network_root.resolve()}", flush=True)
+    print(f"  output      : {out_root.resolve()}", flush=True)
+
     write_events = bool(args.write_events)
     (out_root / "batch_manifest.json").write_text(
         json.dumps(
@@ -316,7 +380,10 @@ def main() -> None:
         ),
         encoding="utf-8",
     )
-    print(f"[Batch2] jobs={len(jobs)} workers={workers} out={out_root}", flush=True)
+    print(
+        f"[Temporal robustness] starting {len(jobs)} analytical-unit jobs",
+        flush=True,
+    )
 
     task_args = [
         (
@@ -362,12 +429,13 @@ def main() -> None:
                 else:
                     other += 1
     print(
-        f"[Batch2] done ok={ok} skip={skip} other={other} "
+        f"[Temporal robustness] finished: completed={ok}, skipped={skip}, "
+        f"incomplete={other}, "
         f"in {(time.time()-t0)/60:.1f} min",
         flush=True,
     )
     if other:
-        raise RuntimeError(f"Batch 2 ended with {other} incomplete jobs")
+        raise RuntimeError(f"Temporal robustness run ended with {other} incomplete jobs")
 
 
 if __name__ == "__main__":

@@ -89,12 +89,29 @@ def build_imputed_mcc(
     states: list[str],
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     prefixes = {STATE_FIPS[state] for state in states}
+    target_fips = {
+        fips for fips in EXPECTED_MISSING if fips[:2] in prefixes
+    }
     target_population = population[
         population["county_fips"].str[:2].isin(prefixes)
     ].copy()
 
+    imputation_population = target_population[
+        target_population["county_fips"].isin(target_fips)
+    ].copy()
+    available_target_fips = set(imputation_population["county_fips"])
+    if available_target_fips != target_fips:
+        raise ValueError(
+            "Population input does not contain every target county. "
+            f"Missing={sorted(target_fips - available_target_fips)}"
+        )
+
+    # These FIPS are known omissions in the official legacy MCC.  Exclude any
+    # temporary values that may already have been copied into MCC.csv, then
+    # reconstruct all nine by one consistent rule.
+    donor_mcc = mcc[~mcc["County_FIPS"].isin(target_fips)].copy()
     joined = target_population.merge(
-        mcc,
+        donor_mcc,
         left_on="county_fips",
         right_on="County_FIPS",
         how="left",
@@ -109,40 +126,49 @@ def build_imputed_mcc(
     if not too_small.empty:
         raise ValueError(f"Too few donor counties: {too_small.to_dict()}")
 
-    missing = joined[joined["Customers"].isna()].copy()
-    missing_fips = set(missing["county_fips"])
-    if missing_fips != EXPECTED_MISSING:
-        raise ValueError(
-            "Unexpected missing MCC counties. "
-            f"Expected={sorted(EXPECTED_MISSING)}, found={sorted(missing_fips)}"
-        )
-
-    missing["state_ratio"] = missing["state_fips"].map(state_ratio)
-    if missing["state_ratio"].isna().any():
+    imputation_population["state_fips"] = imputation_population["county_fips"].str[:2]
+    imputation_population["state_ratio"] = imputation_population["state_fips"].map(
+        state_ratio
+    )
+    if imputation_population["state_ratio"].isna().any():
         raise ValueError("At least one missing county has no state calibration ratio")
-    missing["Customers"] = (
-        missing["population"] * missing["state_ratio"]
+    imputation_population["Customers"] = (
+        imputation_population["population"] * imputation_population["state_ratio"]
     ).round().clip(lower=1).astype(int)
     reverse_state = {value: key for key, value in STATE_FIPS.items()}
-    missing["state"] = missing["state_fips"].map(reverse_state)
-    missing["source"] = "state_median_customers_per_population"
+    imputation_population["state"] = imputation_population["state_fips"].map(
+        reverse_state
+    )
+    imputation_population["source"] = "state_median_customers_per_population"
+    previous = mcc.set_index("County_FIPS")["Customers"]
+    imputation_population["previous_customers"] = imputation_population[
+        "county_fips"
+    ].map(previous)
 
-    additions = missing[["county_fips", "Customers"]].rename(
+    additions = imputation_population[["county_fips", "Customers"]].rename(
         columns={"county_fips": "County_FIPS"}
     )
-    completed = pd.concat([mcc, additions], ignore_index=True)
+    completed = pd.concat([donor_mcc, additions], ignore_index=True)
     completed = completed.sort_values("County_FIPS").reset_index(drop=True)
     completed["Customers"] = completed["Customers"].round().astype(int)
 
-    original = mcc.set_index("County_FIPS")["Customers"]
+    original = donor_mcc.set_index("County_FIPS")["Customers"]
     preserved = completed.set_index("County_FIPS").loc[original.index, "Customers"]
     if not preserved.equals(original.astype(int)):
         raise AssertionError("An existing MCC value changed")
     if completed["County_FIPS"].duplicated().any():
         raise AssertionError("Completed MCC contains duplicate FIPS")
 
-    audit = missing[
-        ["county_fips", "state", "population", "state_ratio", "Customers", "source"]
+    audit = imputation_population[
+        [
+            "county_fips",
+            "state",
+            "population",
+            "state_ratio",
+            "previous_customers",
+            "Customers",
+            "source",
+        ]
     ].rename(columns={"county_fips": "County_FIPS"})
     return completed, audit.sort_values("County_FIPS").reset_index(drop=True)
 

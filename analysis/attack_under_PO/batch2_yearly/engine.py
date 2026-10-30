@@ -70,6 +70,90 @@ def _duration_hours(row: pd.Series) -> float:
     return 1.0
 
 
+def _event_fips(row: pd.Series) -> str:
+    """Return the simulated/observed county FIPS as a five-digit string."""
+    value = row.get("sim_county_fips")
+    if pd.isna(value):
+        value = row.get("fips_str")
+    if pd.isna(value):
+        value = row.get("fips")
+    if pd.isna(value):
+        raise ValueError("Event has no county FIPS")
+    text = str(value)
+    if text.endswith(".0"):
+        text = text[:-2]
+    return text.zfill(5)
+
+
+def _add_radii_and_epicenters(
+    events: pd.DataFrame,
+    *,
+    seed: int,
+    county_geom_mcc: pd.DataFrame,
+    cov_df: pd.DataFrame,
+    poly_dict: dict,
+    pop_gdf: Any,
+    strict: bool,
+) -> pd.DataFrame:
+    """Add deterministic radii and population-weighted within-county epicenters."""
+    if events.empty:
+        return pd.DataFrame()
+
+    chunks = []
+    for event_state in events["sim_state"].drop_duplicates():
+        state_events = events[events["sim_state"] == event_state]
+        chunks.append(
+            compute_radius_for_state_events(
+                state_events, county_geom_mcc, cov_df, str(event_state)
+            )
+        )
+    out = pd.concat(chunks, ignore_index=True)
+
+    if out["impact_radius_km"].isna().any():
+        bad = out.loc[out["impact_radius_km"].isna(), "fips_str"].unique()
+        raise ValueError(f"Missing impact radius for counties={bad[:10]}")
+
+    rng = np.random.default_rng(seed)
+    epicenters: list[tuple[float, float] | None] = []
+    for _, row in out.iterrows():
+        fips_str = _event_fips(row)
+        poly = poly_dict.get(fips_str)
+        epicenter, _ = choose_epicenter_population_mode(
+            county_fips=fips_str, poly=poly, rng=rng, pop_gdf=pop_gdf
+        )
+        if epicenter is None and poly is not None:
+            point = sample_point_in_polygon(poly, rng)
+            epicenter = (float(point.y), float(point.x))
+        if epicenter is None and strict:
+            raise ValueError(f"No within-county epicenter source for county={fips_str}")
+        epicenters.append(epicenter)
+
+    out["epicenter_lat"] = [e[0] if e is not None else np.nan for e in epicenters]
+    out["epicenter_lon"] = [e[1] if e is not None else np.nan for e in epicenters]
+    out = out.dropna(subset=["epicenter_lat", "epicenter_lon"]).reset_index(drop=True)
+    return out
+
+
+def _finalize_event_table(
+    events: pd.DataFrame,
+    *,
+    sim_id: int,
+    seed: int,
+    family: str,
+    year_outage: int | None,
+) -> pd.DataFrame:
+    """Attach the common fields required by the loss evaluator."""
+    out = events.reset_index(drop=True).copy()
+    out["sim_id"] = int(sim_id)
+    out["event_id"] = np.arange(len(out), dtype=int)
+    out["seed"] = int(seed)
+    out["duration_hours"] = [_duration_hours(row) for _, row in out.iterrows()]
+    out["radius_base_km"] = out["impact_radius_km"].astype(float)
+    out["family"] = family
+    out["year_outage"] = "pooled" if year_outage is None else int(year_outage)
+    return out
+
+
 def draw_crn_events_batch2(
     *,
     family: str,
@@ -124,14 +208,6 @@ def draw_crn_events_batch2(
     if "year" not in boot_state.columns:
         boot_state["year"] = pd.to_datetime(boot_state["start_time"]).dt.year
 
-    chunks = []
-    for ev_state in boot_state["sim_state"].unique():
-        chunk = boot_state[boot_state["sim_state"] == ev_state]
-        chunks.append(
-            compute_radius_for_state_events(chunk, county_geom_mcc, cov_df, str(ev_state))
-        )
-    boot_state = pd.concat(chunks, ignore_index=True)
-
     # Attach r_st for the state's outage year (C → 1.0)
     if year_outage is None:
         boot_state["r_st"] = 1.0
@@ -140,44 +216,24 @@ def draw_crn_events_batch2(
             r_lookup(r_table, str(s), int(year_outage)) for s in boot_state["sim_state"]
         ]
 
-    rng = np.random.default_rng(seed)
-    epic_lats: list[float] = []
-    epic_lons: list[float] = []
-    for _, row in boot_state.iterrows():
-        fips_str = str(row.get("fips_str") or row.get("sim_county_fips")).zfill(5)
-        poly = poly_dict.get(fips_str)
-        epic, _ = choose_epicenter_population_mode(
-            county_fips=fips_str, poly=poly, rng=rng, pop_gdf=pop_gdf
-        )
-        if epic is None:
-            if poly is not None:
-                p = sample_point_in_polygon(poly, rng)
-                epic_lats.append(float(p.y))
-                epic_lons.append(float(p.x))
-            else:
-                epic_lats.append(np.nan)
-                epic_lons.append(np.nan)
-        else:
-            epic_lats.append(float(epic[0]))
-            epic_lons.append(float(epic[1]))
-
-    boot_state["epicenter_lat"] = epic_lats
-    boot_state["epicenter_lon"] = epic_lons
-    boot_state = boot_state.dropna(subset=["epicenter_lat", "epicenter_lon"])
+    boot_state = _add_radii_and_epicenters(
+        boot_state,
+        seed=seed,
+        county_geom_mcc=county_geom_mcc,
+        cov_df=cov_df,
+        poly_dict=poly_dict,
+        pop_gdf=pop_gdf,
+        strict=False,
+    )
     if boot_state.empty:
         return pd.DataFrame()
-
-    boot_state = boot_state.reset_index(drop=True)
-    boot_state["sim_id"] = int(sim_id)
-    boot_state["event_id"] = np.arange(len(boot_state), dtype=int)
-    boot_state["seed"] = int(seed)
-    boot_state["duration_hours"] = [
-        _duration_hours(boot_state.iloc[i]) for i in range(len(boot_state))
-    ]
-    boot_state["radius_base_km"] = boot_state["impact_radius_km"].astype(float)
-    boot_state["family"] = family
-    boot_state["year_outage"] = "pooled" if year_outage is None else int(year_outage)
-    return boot_state
+    return _finalize_event_table(
+        boot_state,
+        sim_id=sim_id,
+        seed=seed,
+        family=family,
+        year_outage=year_outage,
+    )
 
 
 def draw_replay_events_batch2(
@@ -194,6 +250,14 @@ def draw_replay_events_batch2(
     pop_gdf: Any,
 ) -> pd.DataFrame:
     """Replay every observed event once; randomize only its within-county epicenter."""
+    if not {"state", "year"}.issubset(outages_all.columns) or not {
+        "fips",
+        "fips_str",
+    }.intersection(outages_all.columns):
+        raise ValueError("Replay source must contain state, year, and county FIPS")
+    if not {"duration_hours", "duration_min"}.intersection(outages_all.columns):
+        raise ValueError("Replay source must contain observed event duration")
+
     seed = crn_seed(
         family=family,
         unit=unit,
@@ -207,6 +271,10 @@ def draw_replay_events_batch2(
     ].copy()
     if observed.empty:
         return pd.DataFrame()
+    if observed["duration_hours"].isna().any() or (
+        observed["duration_hours"] < 0
+    ).any():
+        raise ValueError(f"Invalid observed duration for {unit} {year_outage}")
 
     observed = observed.reset_index().rename(columns={"index": "source_event_id"})
     observed["sim_state"] = observed["state"]
@@ -214,56 +282,27 @@ def draw_replay_events_batch2(
     observed["fallback_level"] = "observed_event"
     observed["used_state_pool_fallback"] = False
 
-    chunks = []
-    for event_state in observed["sim_state"].drop_duplicates():
-        chunk = observed[observed["sim_state"] == event_state]
-        chunks.append(
-            compute_radius_for_state_events(
-                chunk, county_geom_mcc, cov_df, str(event_state)
-            )
-        )
-    replay = pd.concat(chunks, ignore_index=True)
+    replay = _add_radii_and_epicenters(
+        observed,
+        seed=seed,
+        county_geom_mcc=county_geom_mcc,
+        cov_df=cov_df,
+        poly_dict=poly_dict,
+        pop_gdf=pop_gdf,
+        strict=True,
+    )
     if len(replay) != len(observed):
         raise AssertionError(
             f"Replay row count changed for {unit} {year_outage}: "
             f"{len(observed)} -> {len(replay)}"
         )
-    if replay["impact_radius_km"].isna().any():
-        bad = replay.loc[replay["impact_radius_km"].isna(), "fips_str"].unique()
-        raise ValueError(
-            f"Missing replay radius for {unit} {year_outage}, counties={bad[:10]}"
-        )
-
-    rng = np.random.default_rng(seed)
-    epic_lats: list[float] = []
-    epic_lons: list[float] = []
-    for _, row in replay.iterrows():
-        fips_str = str(row["fips_str"]).zfill(5)
-        poly = poly_dict.get(fips_str)
-        epic, _ = choose_epicenter_population_mode(
-            county_fips=fips_str, poly=poly, rng=rng, pop_gdf=pop_gdf
-        )
-        if epic is None:
-            if poly is None:
-                raise ValueError(
-                    f"No within-county epicenter source for {unit} {year_outage} "
-                    f"county={fips_str}"
-                )
-            p = sample_point_in_polygon(poly, rng)
-            epic = (float(p.y), float(p.x))
-        epic_lats.append(float(epic[0]))
-        epic_lons.append(float(epic[1]))
-
-    replay["epicenter_lat"] = epic_lats
-    replay["epicenter_lon"] = epic_lons
-    replay["sim_id"] = int(sim_id)
-    replay["event_id"] = np.arange(len(replay), dtype=int)
-    replay["seed"] = int(seed)
-    replay["duration_hours"] = replay["duration_hours"].astype(float)
-    replay["radius_base_km"] = replay["impact_radius_km"].astype(float)
-    replay["family"] = family
-    replay["year_outage"] = int(year_outage)
-    return replay
+    return _finalize_event_table(
+        replay,
+        sim_id=sim_id,
+        seed=seed,
+        family=family,
+        year_outage=year_outage,
+    )
 
 
 def _metrics_row(
@@ -335,10 +374,6 @@ def run_unit_batch2(
     if event_mode == "replay" and year_outage is None:
         raise ValueError("Replay mode requires a specific outage year")
 
-    if event_mode == "lambda_bootstrap":
-        county_post_df, flat_lam = load_posterior()
-    else:
-        county_post_df, flat_lam = None, None
     outages_df = ensure_outage_year(
         pd.read_csv(
             project_root
@@ -347,7 +382,11 @@ def run_unit_batch2(
             / "cleaned_outages_2018_2023.csv"
         )
     )
-    r_table = build_r_table(outages_df)
+    if event_mode == "lambda_bootstrap":
+        county_post_df, flat_lam = load_posterior()
+        r_table = build_r_table(outages_df)
+    else:
+        county_post_df, flat_lam, r_table = None, None, None
     county_geom_mcc = load_county_geometry_and_mcc(project_root)
     cov_df = load_coverage_history(project_root)
     county_polys = load_county_polygons(project_root)
@@ -377,6 +416,7 @@ def run_unit_batch2(
     )
     removal_cache: OrderedDict = OrderedDict()
     metrics_rows: list[dict] = []
+    replay_signature: pd.DataFrame | None = None
     yo_label: int | str = "pooled" if year_outage is None else int(year_outage)
 
     for sim_id in range(int(n_sims)):
@@ -411,6 +451,18 @@ def run_unit_batch2(
             )
         if events.empty:
             continue
+        if event_mode == "replay":
+            signature = (
+                events[
+                    ["source_event_id", "fips_str", "duration_hours", "radius_base_km"]
+                ]
+                .sort_values("source_event_id")
+                .reset_index(drop=True)
+            )
+            if replay_signature is None:
+                replay_signature = signature
+            else:
+                pd.testing.assert_frame_equal(replay_signature, signature)
         # fallback counts for this sim
         fl = events["fallback_level"] if "fallback_level" in events.columns else None
         if fl is None:
@@ -441,6 +493,8 @@ def run_unit_batch2(
                 f"Replay lost events for {unit} {year_outage} sim={sim_id}: "
                 f"{len(events)} -> {len(ev)}"
             )
+        if event_mode == "replay":
+            ev["source_event_id"] = events["source_event_id"].to_numpy()
         m = aggregate_sim_metrics(ev)
         metrics_rows.append(
             _metrics_row(
@@ -467,6 +521,15 @@ def run_unit_batch2(
         return f"empty:{family}:{unit}"
 
     mdf = pd.DataFrame(metrics_rows)
+    n_events_per_replication: int | None = None
+    if event_mode == "replay":
+        event_counts = mdf["n_events"].astype(int).unique()
+        if len(event_counts) != 1:
+            raise AssertionError(
+                f"Replay event count changed across replications for {unit} "
+                f"{year_outage}: {event_counts.tolist()}"
+            )
+        n_events_per_replication = int(event_counts[0])
     mdf.to_csv(unit_out / "metrics_baseline.csv", index=False)
     summary = {
         "unit": unit,
@@ -476,7 +539,8 @@ def run_unit_batch2(
         "year_outage": yo_label,
         "n_sims": int(len(mdf)),
         "n_nodes": n_nodes,
-        "r_st": r_unit,
+        "r_st": None if event_mode == "replay" else r_unit,
+        "n_events_per_replication": n_events_per_replication,
         "L_cum_mean": float(mdf["L_cum"].mean()),
         "L_cum_std": float(mdf["L_cum"].std(ddof=1)) if len(mdf) > 1 else float("nan"),
         "total_rel_mean": float(mdf["total_rel_loss_x_duration"].mean()),

@@ -3,12 +3,12 @@
 
 Existing MCC values are never changed.  For a missing county c in state s,
 
-    MCC_hat[c] = population[c] * median(MCC[j] / population[j]), j in s.
+    ratio[s] = sum(existing MCC in s) / population covered by existing MCC
+    MCC_hat[c] = population[c] * ratio[s].
 
-Population is aggregated from the tract file used for population-weighted
-outage epicenters.  Official 2020 Census totals supplement the nine counties
-that are absent from that file.  The script writes a two-column MCC file for
-the simulator and a separate audit table describing every imputed county.
+Official 2020 Census county and state totals provide the population scale.
+The script writes a two-column MCC file for the simulator and a separate audit
+table describing every imputed county.
 """
 
 from __future__ import annotations
@@ -68,90 +68,85 @@ def _read_mcc(path: Path) -> pd.DataFrame:
     return table
 
 
-def _read_population(path: Path) -> pd.DataFrame:
-    suffix = path.suffix.lower()
-    if suffix == ".gpkg":
-        import geopandas as gpd
-
-        table = pd.DataFrame(gpd.read_file(path, ignore_geometry=True))
-    elif suffix in {".parquet", ".pq"}:
-        table = pd.read_parquet(path)
-    else:
-        table = pd.read_csv(path)
-
-    required = {"county_fips", "population"}
+def _read_population_reference(path: Path) -> pd.DataFrame:
+    table = pd.read_csv(path)
+    required = {"county_fips", "population", "state_population"}
     if not required.issubset(table.columns):
         raise ValueError(f"{path} must contain {sorted(required)}")
-    table = table[list(required)].copy()
-    table["county_fips"] = table["county_fips"].astype(str).str.zfill(5)
-    table["population"] = pd.to_numeric(table["population"], errors="coerce").fillna(0)
-    table = table.groupby("county_fips", as_index=False)["population"].sum()
-    return table[table["population"] > 0].copy()
-
-
-def _supplement_population(
-    population: pd.DataFrame, supplement: pd.DataFrame
-) -> pd.DataFrame:
-    supplement_fips = set(supplement["county_fips"])
-    if supplement_fips != EXPECTED_MISSING:
+    table = table.copy()
+    table["county_fips"] = (
+        pd.to_numeric(table["county_fips"], errors="coerce")
+        .astype("Int64")
+        .astype(str)
+        .str.zfill(5)
+    )
+    for column in ("population", "state_population"):
+        table[column] = pd.to_numeric(table[column], errors="coerce")
+    if table[["population", "state_population"]].isna().any().any():
+        raise ValueError("Population reference contains missing or invalid values")
+    if (table[["population", "state_population"]] <= 0).any().any():
+        raise ValueError("Population reference contains non-positive values")
+    reference_fips = set(table["county_fips"])
+    if reference_fips != EXPECTED_MISSING:
         raise ValueError(
-            "Population supplement must contain exactly the nine target counties. "
-            f"Missing={sorted(EXPECTED_MISSING - supplement_fips)}, "
-            f"extra={sorted(supplement_fips - EXPECTED_MISSING)}"
+            "Population reference must contain exactly the nine target counties. "
+            f"Missing={sorted(EXPECTED_MISSING - reference_fips)}, "
+            f"extra={sorted(reference_fips - EXPECTED_MISSING)}"
         )
-    population = population[~population["county_fips"].isin(supplement_fips)]
-    return pd.concat([population, supplement], ignore_index=True)
+    return table
 
 
 def build_imputed_mcc(
     mcc: pd.DataFrame,
-    population: pd.DataFrame,
+    population_reference: pd.DataFrame,
     states: list[str],
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     prefixes = {STATE_FIPS[state] for state in states}
     target_fips = {
         fips for fips in EXPECTED_MISSING if fips[:2] in prefixes
     }
-    target_population = population[
-        population["county_fips"].str[:2].isin(prefixes)
+    imputation_population = population_reference[
+        population_reference["county_fips"].isin(target_fips)
     ].copy()
-
-    imputation_population = target_population[
-        target_population["county_fips"].isin(target_fips)
-    ].copy()
-    available_target_fips = set(imputation_population["county_fips"])
-    if available_target_fips != target_fips:
-        raise ValueError(
-            "Population input does not contain every target county. "
-            f"Missing={sorted(target_fips - available_target_fips)}"
-        )
 
     # These FIPS are known omissions in the official legacy MCC.  Exclude any
     # temporary values that may already have been copied into MCC.csv, then
     # reconstruct all nine by one consistent rule.
     donor_mcc = mcc[~mcc["County_FIPS"].isin(target_fips)].copy()
-    joined = target_population.merge(
-        donor_mcc,
-        left_on="county_fips",
-        right_on="County_FIPS",
-        how="left",
-    )
-    joined["state_fips"] = joined["county_fips"].str[:2]
-    donors = joined[joined["Customers"].notna()].copy()
-    donors["customers_per_person"] = donors["Customers"] / donors["population"]
-    state_ratio = donors.groupby("state_fips")["customers_per_person"].median()
-
-    donor_count = donors.groupby("state_fips").size()
+    donor_mcc["state_fips"] = donor_mcc["County_FIPS"].str[:2]
+    donor_mcc = donor_mcc[donor_mcc["state_fips"].isin(prefixes)].copy()
+    donor_count = donor_mcc.groupby("state_fips").size().reindex(prefixes, fill_value=0)
     too_small = donor_count[donor_count < 10]
     if not too_small.empty:
         raise ValueError(f"Too few donor counties: {too_small.to_dict()}")
 
     imputation_population["state_fips"] = imputation_population["county_fips"].str[:2]
+    state_reference = imputation_population.groupby("state_fips").agg(
+        missing_population=("population", "sum"),
+        state_population=("state_population", "first"),
+        state_population_versions=("state_population", "nunique"),
+    )
+    if (state_reference["state_population_versions"] != 1).any():
+        raise ValueError("A state has inconsistent population totals")
+    state_reference["donor_population"] = (
+        state_reference["state_population"]
+        - state_reference["missing_population"]
+    )
+    state_reference["donor_customers"] = donor_mcc.groupby("state_fips")[
+        "Customers"
+    ].sum()
+    state_reference["state_ratio"] = (
+        state_reference["donor_customers"]
+        / state_reference["donor_population"]
+    )
+    state_ratio = state_reference["state_ratio"]
     imputation_population["state_ratio"] = imputation_population["state_fips"].map(
         state_ratio
     )
-    if imputation_population["state_ratio"].isna().any():
-        raise ValueError("At least one missing county has no state calibration ratio")
+    invalid_ratio = ~imputation_population["state_ratio"].gt(0)
+    if invalid_ratio.any():
+        bad_states = sorted(imputation_population.loc[invalid_ratio, "state_fips"].unique())
+        raise ValueError(f"Invalid state calibration ratios: {bad_states}")
     imputation_population["Customers"] = (
         imputation_population["population"] * imputation_population["state_ratio"]
     ).round().clip(lower=1).astype(int)
@@ -159,7 +154,7 @@ def build_imputed_mcc(
     imputation_population["state"] = imputation_population["state_fips"].map(
         reverse_state
     )
-    imputation_population["source"] = "state_median_customers_per_population"
+    imputation_population["source"] = "state_aggregate_customers_per_population"
     imputation_population["population_source"] = (
         "2020_decennial_census_supplement"
     )
@@ -206,11 +201,6 @@ def main() -> None:
         default=root / "notebooks" / "PO_data_cleaning" / "MCC_2022_original.csv",
     )
     parser.add_argument(
-        "--population",
-        type=Path,
-        default=root / "data" / "processed" / "pop_units_epicenter.gpkg",
-    )
-    parser.add_argument(
         "--population-supplement",
         type=Path,
         default=DEFAULT_POPULATION_SUPPLEMENT,
@@ -233,7 +223,7 @@ def main() -> None:
     unknown = sorted(set(states) - set(STATE_FIPS))
     if unknown:
         parser.error(f"Unsupported states: {unknown}")
-    for path in (args.mcc_in, args.population, args.population_supplement):
+    for path in (args.mcc_in, args.population_supplement):
         if not path.is_file():
             raise FileNotFoundError(path)
     if args.mcc_in.resolve() == args.mcc_out.resolve():
@@ -242,12 +232,10 @@ def main() -> None:
         if path.exists() and not args.force:
             raise FileExistsError(f"Refusing to overwrite {path}; use --force")
 
-    population = _supplement_population(
-        _read_population(args.population),
-        _read_population(args.population_supplement),
-    )
     completed, audit = build_imputed_mcc(
-        _read_mcc(args.mcc_in), population, states
+        _read_mcc(args.mcc_in),
+        _read_population_reference(args.population_supplement),
+        states,
     )
     args.mcc_out.parent.mkdir(parents=True, exist_ok=True)
     args.audit_out.parent.mkdir(parents=True, exist_ok=True)
@@ -255,12 +243,11 @@ def main() -> None:
     audit.to_csv(args.audit_out, index=False)
 
     metadata = {
-        "method": "state median of legacy MCC / tract population",
+        "method": "state aggregate of legacy MCC / 2020 Census population",
         "states": states,
         "source_mcc": str(args.mcc_in.resolve()),
         "source_mcc_sha256": _sha256(args.mcc_in),
         "output_mcc_sha256": _sha256(args.mcc_out),
-        "population": str(args.population.resolve()),
         "population_supplement": str(args.population_supplement.resolve()),
         "population_supplement_sha256": _sha256(args.population_supplement),
         "n_existing_preserved": len(completed) - len(audit),

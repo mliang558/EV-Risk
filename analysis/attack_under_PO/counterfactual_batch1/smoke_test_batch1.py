@@ -445,7 +445,11 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="CF Batch1 smoke checks")
     ap.add_argument("--batch-dir", type=str, default="results_cf_batch1_smoke")
     ap.add_argument("--unit", type=str, default="", help="e.g. TX or VT")
-    ap.add_argument("--densify-cache", type=str, default="outputs/network_graph_cf_densify_2023")
+    ap.add_argument(
+        "--densify-cache",
+        type=str,
+        default="outputs/1029-network-nevi-expansion-2023",
+    )
     ap.add_argument("--project-root", type=str, default=str(ROOT))
     ap.add_argument("--check-pop-units-only", action="store_true")
     ap.add_argument(
@@ -459,7 +463,7 @@ def main() -> None:
     ap.add_argument("--n-units", type=int, default=45)
     ap.add_argument("--n-sims-full", type=int, default=100)
     ap.add_argument("--workers", type=int, default=12)
-    ap.add_argument("--n-scenarios-smoke", type=int, default=12)
+    ap.add_argument("--n-scenarios-smoke", type=int, default=11)
     ap.add_argument("--n-scenarios-full", type=int, default=0)
     args = ap.parse_args()
 

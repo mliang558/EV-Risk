@@ -131,6 +131,33 @@ def build_jobs(
     return jobs
 
 
+def validate_network_jobs(jobs: list[dict]) -> None:
+    """Load every selected canonical graph and verify its summary metadata."""
+    import networkx as nx
+
+    from monte_carlo_outage_attack import load_network
+
+    errors: list[str] = []
+    for job in jobs:
+        try:
+            graph = load_network(Path(job["pkl_path"]))
+        except Exception as exc:
+            errors.append(f"{job['unit']}: cannot load {job['pkl_path']}: {exc}")
+            continue
+        expected_nodes = int(job.get("n_nodes", 0))
+        if expected_nodes and graph.number_of_nodes() != expected_nodes:
+            errors.append(
+                f"{job['unit']}: graph has {graph.number_of_nodes()} nodes; "
+                f"summary reports {expected_nodes}"
+            )
+        if graph.number_of_nodes() < 2 or graph.number_of_edges() < 1:
+            errors.append(f"{job['unit']}: graph is too small for efficiency analysis")
+        elif not nx.is_connected(graph.to_undirected()):
+            errors.append(f"{job['unit']}: baseline graph is disconnected")
+    if errors:
+        raise ValueError("Invalid canonical network inputs:\n  " + "\n  ".join(errors))
+
+
 def pd_notna(x) -> bool:
     try:
         import pandas as pd
@@ -256,6 +283,11 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    if args.n_sims < 1:
+        raise ValueError("--n-sims must be at least 1")
+    if args.workers is not None and args.workers < 1:
+        raise ValueError("--workers must be at least 1")
+
     fam = {x.strip() for x in args.families.split(",") if x.strip()} or None
     keyset = {x.strip() for x in args.keys.split(",") if x.strip()} or None
     sc = filter_scenarios(batch1_scenarios(), fam, keyset)
@@ -281,6 +313,7 @@ def main() -> None:
             ROOT / "notebooks" / "PO_data_cleaning" / "cleaned_outages_2018_2023.csv"
         ),
         "county customer counts": ROOT / "notebooks" / "PO_data_cleaning" / "MCC.csv",
+        "coverage history": ROOT.parent / "24237376" / "coverage_history.csv",
     }
     missing = [f"{label}: {path}" for label, path in required.items() if not path.is_file()]
     population_candidates = (
@@ -298,19 +331,57 @@ def main() -> None:
 
         interstate_path = resolve_interstate_shapefile()
         print(f"OK  Interstate corridors: {interstate_path}")
-    print(f"OK  canonical network: {network_root / str(args.network_year)}")
-    print("OK  pooled Bayesian rates and 2018-2023 historical event pool")
-    if args.check_only:
-        print("PASS: intervention inputs are complete")
-        return
 
-    out_root.mkdir(parents=True, exist_ok=True)
-    densify_cache.mkdir(parents=True, exist_ok=True)
+    from compute_impact_radius import resolve_county_shapefile
+
+    county_path = resolve_county_shapefile(ROOT)
+    print(f"OK  county polygons: {county_path}")
 
     only_set = {x.strip() for x in args.only.split(",") if x.strip()} or None
     jobs = build_jobs(network_root, args.network_year, only_set)
     if not jobs:
         raise SystemExit("No jobs.")
+    if only_set is None and len(jobs) != 45:
+        raise ValueError(f"Expected 45 analytical units, found {len(jobs)}")
+    validate_network_jobs(jobs)
+    print(f"OK  canonical network: {network_root / str(args.network_year)}")
+    print(f"OK  loadable connected network graphs: {len(jobs)}")
+    print("OK  pooled Bayesian rates and 2018-2023 historical event pool")
+    if args.check_only:
+        from compute_impact_radius import load_county_geometry_and_mcc, load_coverage_history
+        from sample_lambda_from_posterior import load_posterior
+        from select_epicenter_by_population import require_pop_units
+
+        county_df, flat_lam = load_posterior()
+        if flat_lam.ndim != 2 or flat_lam.shape[1] != len(county_df):
+            raise ValueError(
+                f"Posterior shape {flat_lam.shape} does not match "
+                f"county table length {len(county_df)}"
+            )
+        outages = pd_read(required["cleaned outage events"])
+        if "state" not in outages.columns:
+            raise ValueError("Cleaned outage file lacks state")
+        if not {"fips", "fips_str"}.intersection(outages.columns):
+            raise ValueError("Cleaned outage file lacks county FIPS")
+        if not {"mean_customers", "affected_customers"}.intersection(outages.columns):
+            raise ValueError("Cleaned outage file lacks affected-customer severity")
+        if not {"duration_hours", "duration_min"}.intersection(outages.columns):
+            raise ValueError("Cleaned outage file lacks event duration")
+        county_geometry = load_county_geometry_and_mcc(ROOT)
+        coverage = load_coverage_history(ROOT)
+        pop_units = require_pop_units(ROOT)
+        if county_geometry.empty or coverage.empty or pop_units.empty or outages.empty:
+            raise ValueError("One or more required intervention datasets are empty")
+        print(
+            f"OK  posterior draws={flat_lam.shape[0]} counties={flat_lam.shape[1]}; "
+            f"cleaned events={len(outages)}"
+        )
+        print(f"OK  selected scenarios: {', '.join(s.key for s in sc)}")
+        print("PASS: intervention inputs are complete")
+        return
+
+    out_root.mkdir(parents=True, exist_ok=True)
+    densify_cache.mkdir(parents=True, exist_ok=True)
 
     workers = args.workers if args.workers is not None else _default_workers()
 
@@ -331,7 +402,10 @@ def main() -> None:
         "event_loss": "((E0-E_after)/E0) * duration_hours",
         "annual_loss_W": "sum(event_loss)",
         "reported_L_tilde": "annual_loss_W / scenario_n_nodes",
-        "cf_s_definition": "N_affected -x% => R_c *= sqrt(1-x)",
+        "cf_s_definition": (
+            "N_affected *= (1-x), then recompute coverage-adjusted, "
+            "MCC-capped disruption radius"
+        ),
         "cf_d_definition": (
             "strict Interstate-corridor placement at 50-mile candidates; "
             "no off-corridor population fill; shortfalls retained"

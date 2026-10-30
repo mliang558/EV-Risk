@@ -18,10 +18,14 @@ The default run is `baseline,CF-D,CF-S`. Population and uniform controls must be
 requested explicitly. Urban-radius, 5 km network, within-cluster, and duration scenarios
 are not part of the active manuscript workflow.
 
+For CF-S, the affected-customer count is multiplied by `1 - dose` before the
+coverage adjustment and county-customer cap are reapplied. The disruption radius
+is then recomputed from that counterfactual customer count.
+
 ## Environment
 
 ```bash
-cd /opt/data_repo/mliang_work/Pro_directory
+cd /opt/data_repo/mliang_work/EV-Risk-review
 pip install -r analysis/attack_under_PO/counterfactual_batch1/requirements-batch1.txt
 python -c "import arviz, geopandas, networkx, xarray, netCDF4, shapely, scipy, pandas, numpy; print('environment OK')"
 export PYTHONPATH="$PWD/analysis:$PWD/analysis/attack_under_PO"

@@ -20,13 +20,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-import numpy as np
-
 # Keep local to avoid importing densify_network (heavy) just to list scenarios.
 NULL_REPLICATES = 10
 
 # Shared intensity grid for dose-response (percent).
-# Dose 0 = no intervention (CF-D adds 0 nodes; CF-S radius_scale=1); must match baseline L under CRN.
+# Dose 0 = no intervention; it must match baseline exactly under CRN.
 DOSE_PCTS: tuple[int, ...] = (0, 10, 20, 30, 50)
 
 
@@ -37,6 +35,7 @@ class Scenario:
     key: str
     family: str  # baseline | CF-D | CF-D-pop | CF-D-null | CF-S | CF-T | U | K | CF-D-within
     radius_scale: float = 1.0
+    affected_customer_scale: float | None = None
     duration_scale: float = 1.0
     urban_radius_scale: float | None = None  # if set, only urban counties use this
     densify_pct: float | None = None  # fraction of |V| new hypernodes
@@ -139,18 +138,18 @@ def batch1_scenarios() -> list[Scenario]:
             )
         )
     for pct in DOSE_PCTS:
-        # CF-S: reduce affected customers by pct% ⇒ area ∝ N ⇒ R_c *= sqrt(1 - pct/100)
+        # CF-S: reduce affected customers before coverage correction and MCC capping.
         frac_cut = pct / 100.0
-        radius_scale = float(np.sqrt(max(0.0, 1.0 - frac_cut)))
+        customer_scale = float(max(0.0, 1.0 - frac_cut))
         out.append(
             Scenario(
                 key=f"CF-S_m{pct}",
                 family="CF-S",
-                radius_scale=radius_scale,
+                affected_customer_scale=customer_scale,
                 dose_pct=float(pct),
                 description=(
-                    f"OAT severity: N_affected −{pct}% "
-                    f"(R_c × √(1−{pct}/100) = ×{radius_scale:.4f})"
+                    f"OAT severity: N_affected −{pct}%; recompute radius after "
+                    "coverage correction and county-customer capping"
                 ),
             )
         )

@@ -22,6 +22,7 @@ Cached pickles:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import pickle
 from pathlib import Path
@@ -41,6 +42,7 @@ from analysis.build_charging_network_step2 import (
 DEFAULT_CLUSTER_RADIUS_M = 10_000.0
 NEVI_SPACING_M = 50.0 * 1609.344  # 50 miles — NEVI corridor spacing
 NULL_REPLICATES = 10
+CACHE_SCHEMA = "strict_corridor_local_aeqd_geodesic_v1"
 
 # Sibling of Pro_directory (EV_Project) — highway + county assets live here
 _EV_PROJECT = Path(__file__).resolve().parents[4]
@@ -58,6 +60,16 @@ def _node_coords(G: nx.Graph) -> tuple[np.ndarray, list]:
             lat, lon = d.get("lat"), d.get("lon")
         coords[i] = (float(lat), float(lon))
     return coords, nodes
+
+
+def _graph_signature(G: nx.Graph) -> str:
+    """Stable geometry signature used to reject stale counterfactual caches."""
+    coords, _ = _node_coords(G)
+    rounded = np.round(coords, decimals=10)
+    if len(rounded):
+        rounded = rounded[np.lexsort((rounded[:, 1], rounded[:, 0]))]
+    digest = hashlib.sha256(rounded.astype("<f8", copy=False).tobytes()).hexdigest()
+    return f"n={len(rounded)};sha256={digest}"
 
 
 def _rebuild_edges(G: nx.Graph) -> nx.Graph:
@@ -701,17 +713,26 @@ def load_or_build_densified(
     if mode_norm in ("null", "random"):
         mode_norm = "uniform"
     path = cache_path(cache_root, mode_norm, pct, unit, replicate=replicate)
+    base_signature = _graph_signature(G)
     if path.is_file() and not force:
         with open(path, "rb") as f:
             payload = pickle.load(f)
-        meta = payload.get("meta", {}) or {}
-        meta_path = path.with_suffix(".meta.json")
-        if meta and not meta_path.is_file():
-            try:
-                meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
-            except Exception:
-                pass
-        return payload["network"], meta
+        if isinstance(payload, dict) and "network" in payload:
+            meta = payload.get("meta", {}) or {}
+            cache_matches = (
+                meta.get("cache_schema") == CACHE_SCHEMA
+                and meta.get("base_graph_signature") == base_signature
+                and float(meta.get("cluster_radius_m", -1.0)) == float(cluster_radius_m)
+            )
+            if cache_matches:
+                meta_path = path.with_suffix(".meta.json")
+                if meta and not meta_path.is_file():
+                    try:
+                        meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+                    except Exception:
+                        pass
+                return payload["network"], meta
+        print(f"[cache-rebuild] incompatible counterfactual cache: {path}", flush=True)
 
     # For null replicates, fold replicate into seed
     use_seed = int(seed)
@@ -725,6 +746,13 @@ def load_or_build_densified(
         cluster_radius_m=cluster_radius_m,
         seed=use_seed,
         member_state_abbrs=member_state_abbrs,
+    )
+    meta.update(
+        {
+            "cache_schema": CACHE_SCHEMA,
+            "base_graph_signature": base_signature,
+            "cluster_radius_m": float(cluster_radius_m),
+        }
     )
     if replicate is not None:
         meta["replicate"] = int(replicate)

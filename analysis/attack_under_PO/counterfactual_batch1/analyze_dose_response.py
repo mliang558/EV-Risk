@@ -39,7 +39,7 @@ FAMILY_LABEL = {
     "CF-D": "NEVI corridor (main)",
     "CF-D-pop": "Population-weighted",
     "CF-D-null": "Uniform null (mean of 10 reps)",
-    "CF-S": "Severity: N_aff −% (R_c×√(1−x))",
+    "CF-S": "Severity: affected customers −%",
 }
 
 ANALYSIS_FAMILIES = ("CF-D", "CF-D-pop", "CF-D-null", "CF-S")

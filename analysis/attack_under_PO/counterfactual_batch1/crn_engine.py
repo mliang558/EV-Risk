@@ -208,6 +208,20 @@ def _effective_radius(
     urban_fips: set[str],
 ) -> float:
     r = float(row["radius_base_km"])
+    if scenario.affected_customer_scale is not None:
+        required = ("Nd", "theta_s", "MCC", "rho")
+        missing = [name for name in required if name not in row.index or pd.isna(row[name])]
+        if missing:
+            raise ValueError(
+                "Cannot recompute severity-reduction radius; missing event fields: "
+                + ", ".join(missing)
+            )
+        nd = max(0.0, float(row["Nd"])) * float(scenario.affected_customer_scale)
+        theta = float(np.clip(float(row["theta_s"]), 1e-3, 1.0))
+        mcc = max(0.0, float(row["MCC"]))
+        rho = max(1e-6, float(row["rho"]))
+        nd_effective = min(nd / theta, mcc)
+        return float(np.sqrt(nd_effective / (rho * np.pi)))
     if scenario.urban_radius_scale is not None:
         fips = str(row.get("fips_str", "")).zfill(5)
         if fips in urban_fips:
@@ -280,6 +294,12 @@ def evaluate_events_on_graph(
         rel_loss_x_duration = float(pct_loss) * duration_h
         rel_lcc_loss_x_duration = lcc_deficit * duration_h
         nd = float(row.get("Nd", row.get("affected_customers", 0.0)) or 0.0)
+        nd_scale = (
+            float(scenario.affected_customer_scale)
+            if scenario.affected_customer_scale is not None
+            else 1.0
+        )
+        nd_scenario = nd * nd_scale
 
         records.append(
             {
@@ -303,7 +323,9 @@ def evaluate_events_on_graph(
                 "rel_loss_x_duration": float(rel_loss_x_duration),
                 "rel_lcc_loss_x_duration": float(rel_lcc_loss_x_duration),
                 "lcc_frac": float(lcc_frac),
-                "customer_hours": nd * float(row["duration_hours"]),
+                "affected_customers_base": nd,
+                "affected_customers_scenario": nd_scenario,
+                "customer_hours": nd_scenario * float(row["duration_hours"]),
                 "used_state_pool_fallback": bool(
                     row.get("used_state_pool_fallback", False)
                 ),
@@ -474,6 +496,7 @@ def run_unit_batch1(
     # Epicenters always drawn once per sim (population/KDE on G_base); densified
     # graphs only for loss evaluation.
     graph_cache: dict[str, tuple[nx.Graph, float]] = {}
+    scenario_variants: dict[str, str] = {}
     skip_keys: set[str] = set()
     for sc in scenarios:
         G_sc, note = resolve_graph_for_scenario(
@@ -489,6 +512,7 @@ def run_unit_batch1(
             print(f"[skip-scenario] {unit} {sc.key}: {note}", flush=True)
             continue
         variant = note
+        scenario_variants[sc.key] = variant
         if variant not in graph_cache:
             try:
                 E0 = float(nx.global_efficiency(G_sc))
@@ -547,16 +571,8 @@ def run_unit_batch1(
             )
 
         for sc in active:
-            G_sc, note = resolve_graph_for_scenario(
-                sc,
-                G_base=G_base,
-                unit=unit,
-                densify_cache=densify_cache,
-                k5km_pkl=k5km_pkl,
-                member_state_abbrs=member_abbrs,
-            )
-            assert G_sc is not None
-            G_use, E0 = graph_cache[note]
+            variant = scenario_variants[sc.key]
+            G_use, E0 = graph_cache[variant]
             ev = evaluate_events_on_graph(
                 events=events,
                 G=G_use,
@@ -564,7 +580,7 @@ def run_unit_batch1(
                 scenario=sc,
                 urban_fips=urban_fips,
                 removal_cache=removal_cache,
-                graph_id=note,
+                graph_id=variant,
             )
             if write_events:
                 events_by_sc[sc.key].append(ev)

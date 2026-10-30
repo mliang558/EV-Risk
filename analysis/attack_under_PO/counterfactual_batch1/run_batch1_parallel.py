@@ -259,6 +259,9 @@ def main() -> None:
         "county_assignment": "county rate / state rate",
         "epicenter": "census-tract population weighted",
         "event_count": "Poisson draw from the summed county rates",
+        "coverage_adjustment": (
+            "state-year max_pct_covered; 2023 carries forward each state's 2022 value"
+        ),
         "event_reset": "restore the original scenario network after every event",
         "global_efficiency": "unweighted, with the original-node denominator fixed after removal",
         "corridor_intervention": "50-mile Interstate candidates, at least 10 km apart",

@@ -214,24 +214,44 @@ def load_county_geometry_and_mcc(project_root: Path) -> pd.DataFrame:
     return df
 
 
-def load_coverage_history(project_root: Path) -> pd.DataFrame:
-    """
-    Load coverage_history.csv and extract theta_s (max_pct_covered) by state-year.
-    """
-    cov_path = project_root.parent / "24237376" / "coverage_history.csv"
-    if not cov_path.exists():
-        raise FileNotFoundError(f"coverage_history.csv not found: {cov_path}")
+def _prepare_coverage_history(cov: pd.DataFrame) -> pd.DataFrame:
+    """Validate coverage and carry each state's 2022 value into 2023."""
+    required = {"year", "state", "max_pct_covered"}
+    if not required.issubset(cov.columns):
+        raise ValueError(f"coverage_history.csv must contain {sorted(required)}")
 
-    cov = pd.read_csv(cov_path)
-    # Parse year column (e.g., '1/1/18') to integer year with explicit format
+    cov = cov.copy()
     cov["year_num"] = pd.to_datetime(
         cov["year"], format="%m/%d/%y", errors="coerce"
     ).dt.year
-    cov = cov.rename(columns={"state": "state_abbr"})
+    cov["state_abbr"] = cov["state"].astype(str).str.strip().str.upper()
+    cov["theta_s"] = pd.to_numeric(cov["max_pct_covered"], errors="coerce")
+    invalid = (
+        cov[["year_num", "theta_s"]].isna().any(axis=1)
+        | ~cov["theta_s"].between(0, 1, inclusive="both")
+    )
+    if invalid.any():
+        raise ValueError(f"Invalid coverage rows: {int(invalid.sum())}")
+    if cov.duplicated(["state_abbr", "year_num"]).any():
+        raise ValueError("coverage_history.csv contains duplicate state-year rows")
 
-    # Use max_pct_covered as theta_s (coverage rate between 0–1)
-    cov["theta_s"] = cov["max_pct_covered"].astype(float)
+    # Official coverage metadata end in 2022 although outage records continue
+    # through 2023.  Carry the latest observed state value forward one year.
+    has_2023 = set(cov.loc[cov["year_num"] == 2023, "state_abbr"])
+    carry = cov[
+        (cov["year_num"] == 2022) & ~cov["state_abbr"].isin(has_2023)
+    ].copy()
+    carry["year_num"] = 2023
+    cov = pd.concat([cov, carry], ignore_index=True)
     return cov[["state_abbr", "year_num", "theta_s"]]
+
+
+def load_coverage_history(project_root: Path) -> pd.DataFrame:
+    """Load state-year EAGLE-I coverage, carrying 2022 into 2023."""
+    cov_path = project_root.parent / "24237376" / "coverage_history.csv"
+    if not cov_path.exists():
+        raise FileNotFoundError(f"coverage_history.csv not found: {cov_path}")
+    return _prepare_coverage_history(pd.read_csv(cov_path))
 
 
 def compute_radius_for_events(project_root: Path) -> pd.DataFrame:

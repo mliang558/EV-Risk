@@ -159,6 +159,7 @@ def _worker(args: tuple) -> str:
         force,
         write_events,
         share_as_B2023,
+        event_mode,
     ) = args
 
     os.environ.setdefault("OMP_NUM_THREADS", "1")
@@ -188,6 +189,7 @@ def _worker(args: tuple) -> str:
         project_root=root,
         force=bool(force),
         write_events=bool(write_events),
+        event_mode=str(event_mode),
     )
 
     if share_as_B2023:
@@ -242,6 +244,12 @@ def main() -> None:
     ap.add_argument("--only", type=str, default="")
     ap.add_argument("--force", action="store_true")
     ap.add_argument(
+        "--event-mode",
+        choices=("lambda_bootstrap", "replay"),
+        default="lambda_bootstrap",
+        help="replay uses every observed event once and randomizes only epicenters",
+    )
+    ap.add_argument(
         "--write-events",
         action="store_true",
         help="Write per-sim event dumps (default off)",
@@ -272,6 +280,14 @@ def main() -> None:
     )
     r_table = build_r_table(outages)
     save_r_table(r_table, out_root / "r_st_table.csv")
+    if args.event_mode == "replay":
+        (
+            outages.groupby(["state", "year"], observed=True)
+            .size()
+            .rename("n_observed_events")
+            .reset_index()
+            .to_csv(out_root / "observed_event_counts.csv", index=False)
+        )
 
     nproc = os.cpu_count() or 8
     workers = args.workers if args.workers is not None else nproc
@@ -285,6 +301,7 @@ def main() -> None:
                 "years": args.years,
                 "n_sims": args.n_sims,
                 "n_jobs": len(jobs),
+                "event_mode": args.event_mode,
                 "note": "A_2023 written once and copied to B_2023 with assert",
             },
             indent=2,
@@ -307,6 +324,7 @@ def main() -> None:
             args.force,
             write_events,
             j.get("share_as_B2023", False),
+            args.event_mode,
         )
         for j in jobs
     ]

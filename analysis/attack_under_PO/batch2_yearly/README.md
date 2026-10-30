@@ -32,6 +32,19 @@ removal cache `(graph_id, frozenset(S))`, and metrics. New package:
 
 ## Smoke → full
 
+### Historical replay sensitivity
+
+`EVENT_MODE=replay` uses every cleaned event in the selected outage year exactly
+once per replication. County, severity, and duration remain fixed; only the
+within-county population-weighted epicenter is redrawn. Use a new output root so
+these results cannot overwrite the legacy lambda-bootstrap experiment.
+
+```bash
+N_SIMS=100 WORKERS=45 FAMILIES="B" EVENT_MODE=replay \
+  OUT=$PWD/results_batch2_B_replay \
+  bash analysis/attack_under_PO/batch2_yearly/run_cluster.sh
+```
+
 ```bash
 cd /opt/data_repo/mliang_work/Pro_directory
 export PYTHONPATH="$PWD/analysis:$PWD/analysis/attack_under_PO"

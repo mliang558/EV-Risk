@@ -26,7 +26,11 @@ from monte_carlo_outage_attack import (
     load_coverage_history,
     sample_point_in_polygon,
 )
-from sample_lambda_from_posterior import draw_lambda_realization, load_posterior
+from sample_lambda_from_posterior import (
+    draw_lambda_realization,
+    load_posterior,
+    prepare_outages_for_bootstrap,
+)
 from select_epicenter_by_population import (
     choose_epicenter_population_mode,
     require_pop_units,
@@ -176,6 +180,92 @@ def draw_crn_events_batch2(
     return boot_state
 
 
+def draw_replay_events_batch2(
+    *,
+    family: str,
+    unit: str,
+    sim_id: int,
+    year_outage: int,
+    target_states: list[str],
+    outages_all: pd.DataFrame,
+    county_geom_mcc: pd.DataFrame,
+    cov_df: pd.DataFrame,
+    poly_dict: dict,
+    pop_gdf: Any,
+) -> pd.DataFrame:
+    """Replay every observed event once; randomize only its within-county epicenter."""
+    seed = crn_seed(
+        family=family,
+        unit=unit,
+        year_outage=int(year_outage),
+        sim_id=sim_id,
+    )
+    observed = prepare_outages_for_bootstrap(outages_all)
+    observed = observed[
+        (observed["year"].astype(int) == int(year_outage))
+        & (observed["state"].isin(target_states))
+    ].copy()
+    if observed.empty:
+        return pd.DataFrame()
+
+    observed = observed.reset_index().rename(columns={"index": "source_event_id"})
+    observed["sim_state"] = observed["state"]
+    observed["sim_county_fips"] = observed["fips_str"].astype(str).str.zfill(5)
+    observed["fallback_level"] = "observed_event"
+    observed["used_state_pool_fallback"] = False
+
+    chunks = []
+    for event_state in observed["sim_state"].drop_duplicates():
+        chunk = observed[observed["sim_state"] == event_state]
+        chunks.append(
+            compute_radius_for_state_events(
+                chunk, county_geom_mcc, cov_df, str(event_state)
+            )
+        )
+    replay = pd.concat(chunks, ignore_index=True)
+    if len(replay) != len(observed):
+        raise AssertionError(
+            f"Replay row count changed for {unit} {year_outage}: "
+            f"{len(observed)} -> {len(replay)}"
+        )
+    if replay["impact_radius_km"].isna().any():
+        bad = replay.loc[replay["impact_radius_km"].isna(), "fips_str"].unique()
+        raise ValueError(
+            f"Missing replay radius for {unit} {year_outage}, counties={bad[:10]}"
+        )
+
+    rng = np.random.default_rng(seed)
+    epic_lats: list[float] = []
+    epic_lons: list[float] = []
+    for _, row in replay.iterrows():
+        fips_str = str(row["fips_str"]).zfill(5)
+        poly = poly_dict.get(fips_str)
+        epic, _ = choose_epicenter_population_mode(
+            county_fips=fips_str, poly=poly, rng=rng, pop_gdf=pop_gdf
+        )
+        if epic is None:
+            if poly is None:
+                raise ValueError(
+                    f"No within-county epicenter source for {unit} {year_outage} "
+                    f"county={fips_str}"
+                )
+            p = sample_point_in_polygon(poly, rng)
+            epic = (float(p.y), float(p.x))
+        epic_lats.append(float(epic[0]))
+        epic_lons.append(float(epic[1]))
+
+    replay["epicenter_lat"] = epic_lats
+    replay["epicenter_lon"] = epic_lons
+    replay["sim_id"] = int(sim_id)
+    replay["event_id"] = np.arange(len(replay), dtype=int)
+    replay["seed"] = int(seed)
+    replay["duration_hours"] = replay["duration_hours"].astype(float)
+    replay["radius_base_km"] = replay["impact_radius_km"].astype(float)
+    replay["family"] = family
+    replay["year_outage"] = int(year_outage)
+    return replay
+
+
 def _metrics_row(
     m: dict[str, Any],
     *,
@@ -218,6 +308,7 @@ def run_unit_batch2(
     project_root: Path,
     force: bool = False,
     write_events: bool = False,
+    event_mode: str = "lambda_bootstrap",
 ) -> str:
     """
     Baseline-only Batch-2 run for one unit.
@@ -238,7 +329,16 @@ def run_unit_batch2(
         E0 = 0.0
     graph_id = f"net{year_network}:{unit}"
 
-    county_post_df, flat_lam = load_posterior()
+    event_mode = str(event_mode).strip().lower()
+    if event_mode not in {"lambda_bootstrap", "replay"}:
+        raise ValueError(f"Unknown event_mode={event_mode!r}")
+    if event_mode == "replay" and year_outage is None:
+        raise ValueError("Replay mode requires a specific outage year")
+
+    if event_mode == "lambda_bootstrap":
+        county_post_df, flat_lam = load_posterior()
+    else:
+        county_post_df, flat_lam = None, None
     outages_df = ensure_outage_year(
         pd.read_csv(
             project_root
@@ -262,7 +362,9 @@ def run_unit_batch2(
             raise ValueError(f"No abbr mapping for {s}")
 
     # representative r_st for unit (mean over member states at year_outage)
-    if year_outage is None:
+    if event_mode == "replay":
+        r_unit = float("nan")
+    elif year_outage is None:
         r_unit = 1.0
     else:
         rs = [r_lookup(r_table, s, int(year_outage)) for s in target_states]
@@ -278,21 +380,35 @@ def run_unit_batch2(
     yo_label: int | str = "pooled" if year_outage is None else int(year_outage)
 
     for sim_id in range(int(n_sims)):
-        events = draw_crn_events_batch2(
-            family=family,
-            unit=unit,
-            sim_id=sim_id,
-            year_outage=year_outage,
-            target_states=target_states,
-            outages_all=outages_df,
-            r_table=r_table,
-            county_post_df=county_post_df,
-            flat_lam=flat_lam,
-            county_geom_mcc=county_geom_mcc,
-            cov_df=cov_df,
-            poly_dict=poly_dict,
-            pop_gdf=pop_gdf,
-        )
+        if event_mode == "replay":
+            events = draw_replay_events_batch2(
+                family=family,
+                unit=unit,
+                sim_id=sim_id,
+                year_outage=int(year_outage),
+                target_states=target_states,
+                outages_all=outages_df,
+                county_geom_mcc=county_geom_mcc,
+                cov_df=cov_df,
+                poly_dict=poly_dict,
+                pop_gdf=pop_gdf,
+            )
+        else:
+            events = draw_crn_events_batch2(
+                family=family,
+                unit=unit,
+                sim_id=sim_id,
+                year_outage=year_outage,
+                target_states=target_states,
+                outages_all=outages_df,
+                r_table=r_table,
+                county_post_df=county_post_df,
+                flat_lam=flat_lam,
+                county_geom_mcc=county_geom_mcc,
+                cov_df=cov_df,
+                poly_dict=poly_dict,
+                pop_gdf=pop_gdf,
+            )
         if events.empty:
             continue
         # fallback counts for this sim
@@ -320,6 +436,11 @@ def run_unit_batch2(
         if "graph_id" in sig.parameters:
             kw["graph_id"] = graph_id
         ev = evaluate_events_on_graph(**kw)
+        if event_mode == "replay" and len(ev) != len(events):
+            raise AssertionError(
+                f"Replay lost events for {unit} {year_outage} sim={sim_id}: "
+                f"{len(events)} -> {len(ev)}"
+            )
         m = aggregate_sim_metrics(ev)
         metrics_rows.append(
             _metrics_row(
@@ -364,6 +485,7 @@ def run_unit_batch2(
         "n_fb_state_year": int(mdf["n_fb_state_year"].sum()),
         "n_fb_state_pooled": int(mdf["n_fb_state_pooled"].sum()),
         "git_commit": git,
+        "event_mode": event_mode,
     }
     pd.DataFrame([summary]).to_csv(summary_path, index=False)
     (unit_out / "manifest.json").write_text(
@@ -372,6 +494,7 @@ def run_unit_batch2(
                 **summary,
                 "pkl_path": str(pkl_path),
                 "member_states": target_states,
+                "event_mode": event_mode,
                 "seed_rule": (
                     "C: sim_id (Batch1-compatible); "
                     "A/B: md5(unit|year_outage|sim)[:8]"

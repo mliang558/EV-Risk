@@ -17,6 +17,16 @@ import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
+# Each analytical unit is already a separate process.  Keep numerical
+# libraries single-threaded so --workers controls total CPU use predictably.
+for variable in (
+    "OMP_NUM_THREADS",
+    "MKL_NUM_THREADS",
+    "OPENBLAS_NUM_THREADS",
+    "NUMEXPR_NUM_THREADS",
+):
+    os.environ.setdefault(variable, "1")
+
 import pandas as pd
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -157,9 +167,6 @@ def _worker(args: tuple) -> str:
         share_as_B2023,
         event_mode,
     ) = args
-
-    os.environ.setdefault("OMP_NUM_THREADS", "1")
-    os.environ.setdefault("MKL_NUM_THREADS", "1")
 
     root = Path(__file__).resolve().parents[3]
     attack = Path(__file__).resolve().parents[1]

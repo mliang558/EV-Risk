@@ -200,12 +200,13 @@ def _run_job(task: dict) -> str:
         member_states=task["member_states"],
         pkl_path=task["pkl_path"],
         out_dir=task["out"],
-        scenarios=batch1_scenarios(),
+        scenarios=task["scenarios"],
         n_sims=task["n_sims"],
         project_root=ROOT,
         densify_cache=task["cache"],
         force=task["force"],
         write_events=task["write_events"],
+        epicenter_mode=task["epicenter_mode"],
     )
 
 
@@ -226,6 +227,16 @@ def main() -> None:
     parser.add_argument("--n-sims", type=int, default=100)
     parser.add_argument("--workers", type=int, default=os.cpu_count() or 1)
     parser.add_argument("--only", default="", help="Comma-separated analytical units")
+    parser.add_argument(
+        "--families",
+        default="baseline,CF-D,CF-S",
+        help="Comma-separated scenario families",
+    )
+    parser.add_argument(
+        "--epicenter-mode",
+        choices=("population", "station"),
+        default="population",
+    )
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--no-events", action="store_true")
     parser.add_argument("--check-only", action="store_true")
@@ -248,7 +259,16 @@ def main() -> None:
     out.mkdir(parents=True, exist_ok=True)
     cache.mkdir(parents=True, exist_ok=True)
     workers = min(args.workers, len(jobs))
-    scenarios = batch1_scenarios()
+    requested_families = {
+        family.strip() for family in args.families.split(",") if family.strip()
+    }
+    scenarios = [
+        scenario
+        for scenario in batch1_scenarios()
+        if scenario.family in requested_families
+    ]
+    if not scenarios:
+        raise ValueError(f"No scenarios matched --families={args.families!r}")
     manifest = {
         "created_utc": datetime.now(timezone.utc).isoformat(),
         "git_commit": _git_commit(),
@@ -257,7 +277,7 @@ def main() -> None:
         "outage_model": "pooled 2018-2023 posterior and event pool",
         "state_rate": "sum of county rates",
         "county_assignment": "county rate / state rate",
-        "epicenter": "census-tract population weighted",
+        "epicenter": args.epicenter_mode,
         "event_count": "Poisson draw from the summed county rates",
         "coverage_adjustment": (
             "state-year max_pct_covered; 2023 carries forward each state's 2022 value"
@@ -281,6 +301,8 @@ def main() -> None:
             "n_sims": args.n_sims,
             "force": args.force,
             "write_events": not args.no_events,
+            "scenarios": scenarios,
+            "epicenter_mode": args.epicenter_mode,
         }
         for job in jobs
     ]

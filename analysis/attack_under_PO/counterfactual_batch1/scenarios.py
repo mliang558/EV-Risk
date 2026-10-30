@@ -8,7 +8,8 @@ Design: one-at-a-time (OAT) dose sweep with common random numbers.
   - Shared dose grid for CF-D and CF-S: 0 (baseline), 10, 20, 30, 50%.
 
 CF-D placement rules (coverage expansion, not within-cluster densify):
-  CF-D      = NEVI corridor (main) — every 50 mi on interstate, >10 km from existing
+  CF-D      = NEVI-style corridor (main) — 50-mile Interstate candidates,
+              >10 km from existing and newly added hypernodes
   CF-D-pop  = population-weighted in unit counties
   CF-D-null = uniform spatial null, 10 seed replicates
 
@@ -79,8 +80,9 @@ def batch1_scenarios() -> list[Scenario]:
                 network_variant=net_var,
                 dose_pct=float(pct),
                 description=(
-                    f"NEVI corridor coverage: +{pct}% hypernodes every 50 mi on "
-                    f"interstate, excluding sites <10 km from existing (main CF-D)"
+                    f"NEVI-style corridor coverage: target +{pct}% hypernodes at "
+                    f"50-mile Interstate candidates, excluding sites <10 km from "
+                    f"existing or newly added nodes (main intervention)"
                     if pct > 0
                     else "CF-D dose 0 (no nodes added; CRN lock vs baseline)"
                 ),

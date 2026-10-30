@@ -4,17 +4,17 @@ CF-D coverage expansion: add hypernodes OUTSIDE existing 10 km cluster footprint
 
 Placement rules (all enforce min distance ≥ cluster_radius_m to existing hypernodes)
 ------------------------------------------------------------------------------------
-nevi     : PRIMARY — candidates every 50 miles along interstate / AFC corridors;
-           exclude sites < 10 km from an existing hypernode; at each dose take the
-           largest-gap sites first (policy-relevant NEVI-style fill-in).
+nevi     : PRIMARY — candidates every 50 miles along interstate corridors;
+           exclude sites < 10 km from existing and newly added hypernodes; at
+           each dose take the largest-gap sites first.
 pop      : population-weighted rejection sampling in unit counties (demand-oriented).
 uniform  : uniform in unit counties (null / spatial control); use seed replicates.
 
 Capacity is irrelevant: global efficiency is topology-only. Within-cluster densify /
 EVSE upgrades are beyond model resolution (see densify_within).
 
-Base graphs are NOT rebuilt — densify from existing 10 km pickles
-(``outputs/network_graph_10km_2018_2026/2023/...``).
+Base graphs are not regenerated from stations. Counterfactual nodes are added
+to the validated 2023 canonical graph and all Voronoi edges are then rebuilt.
 
 Cached pickles:
   outputs/network_graph_cf_densify_2023/{nevi,pop,uniform}_p{pct}[_r{k}]/network_structures/
@@ -29,17 +29,13 @@ from typing import Any
 
 import networkx as nx
 import numpy as np
-from scipy.spatial import Delaunay, Voronoi
 
-try:
-    from run_charging_network import _to_epsg3857_meters
-except Exception:  # pragma: no cover
-    def _to_epsg3857_meters(lat: np.ndarray, lon: np.ndarray) -> np.ndarray:
-        lat = np.asarray(lat, dtype=float)
-        lon = np.asarray(lon, dtype=float)
-        x = lon * 20037508.34 / 180.0
-        y = np.log(np.tan((90.0 + lat) * np.pi / 360.0)) * 20037508.34 / np.pi
-        return np.column_stack([x, y])
+from analysis.build_charging_network_step2 import (
+    WGS84_GEOD,
+    _geodesic_distance_matrix,
+    _to_local_aeqd_meters,
+    voronoi_adjacency,
+)
 
 
 DEFAULT_CLUSTER_RADIUS_M = 10_000.0
@@ -64,45 +60,36 @@ def _node_coords(G: nx.Graph) -> tuple[np.ndarray, list]:
     return coords, nodes
 
 
-def _voronoi_or_delaunay_edges(coords_3857: np.ndarray) -> set[tuple[int, int]]:
-    n = len(coords_3857)
-    if n < 2:
-        return set()
-    if n < 4:
-        return {(i, j) for i in range(n) for j in range(i + 1, n)}
-    try:
-        vor = Voronoi(coords_3857)
-        adj: set[tuple[int, int]] = set()
-        for p1, p2 in vor.ridge_points:
-            a, b = (p1, p2) if p1 < p2 else (p2, p1)
-            adj.add((a, b))
-        return adj
-    except Exception:
-        tri = Delaunay(coords_3857)
-        adj = set()
-        for simplex in tri.simplices:
-            for i in range(3):
-                a, b = sorted((int(simplex[i]), int(simplex[(i + 1) % 3])))
-                if a != b:
-                    adj.add((a, b))
-        return adj
-
-
 def _rebuild_edges(G: nx.Graph) -> nx.Graph:
+    """Rebuild edges using the canonical projection and distance definitions."""
     coords_ll, nodes = _node_coords(G)
-    coords_m = _to_epsg3857_meters(coords_ll[:, 0], coords_ll[:, 1])
-    adj = _voronoi_or_delaunay_edges(coords_m)
-    dist = np.linalg.norm(coords_m[:, None, :] - coords_m[None, :, :], axis=2)
+    coords_m, projection = _to_local_aeqd_meters(coords_ll)
+    if len(nodes) < 4:
+        adj = {(i, j) for i in range(len(nodes)) for j in range(i + 1, len(nodes))}
+        adjacency_method = "complete_small"
+    else:
+        adj = voronoi_adjacency(coords_m)
+        adjacency_method = "voronoi_local_aeqd"
+    dist = _geodesic_distance_matrix(coords_ll)
     dmax = float(dist.max()) if dist.size else 1.0
     if dmax <= 0:
         dmax = 1.0
-    H = nx.Graph()
+    H = nx.Graph(**dict(G.graph))
     for n in nodes:
         H.add_node(n, **dict(G.nodes[n]))
     for a, b in adj:
         na, nb = nodes[a], nodes[b]
         d_m = float(dist[a, b])
         H.add_edge(na, nb, weight=d_m / dmax, distance_m=d_m)
+    H.graph.update(
+        {
+            "adjacency": adjacency_method,
+            "voronoi_crs": projection,
+            "distance_method": "WGS84_geodesic",
+        }
+    )
+    if nodes and not nx.is_connected(H):
+        raise RuntimeError("Counterfactual Voronoi graph is disconnected")
     return H
 
 
@@ -285,10 +272,16 @@ def _sample_along_lines(
     roads_gdf,
     spacing_m: float = NEVI_SPACING_M,
 ) -> np.ndarray:
-    """Return (N, 2) lon/lat points every spacing_m along each line."""
+    """Return (N, 2) lat/lon candidates at approximate route-distance spacing."""
     if roads_gdf is None or len(roads_gdf) == 0:
         return np.zeros((0, 2), dtype=float)
-    roads_m = roads_gdf.to_crs(3857)
+    roads_ll = roads_gdf.to_crs(4326)
+    center = roads_ll.geometry.unary_union.centroid
+    projection = (
+        f"+proj=aeqd +lat_0={float(center.y):.12f} "
+        f"+lon_0={float(center.x):.12f} +datum=WGS84 +units=m +no_defs"
+    )
+    roads_m = roads_ll.to_crs(projection)
     pts: list[tuple[float, float]] = []
     for geom in roads_m.geometry:
         if geom is None or geom.is_empty:
@@ -306,33 +299,43 @@ def _sample_along_lines(
     if not pts:
         return np.zeros((0, 2), dtype=float)
     arr_m = np.asarray(pts, dtype=float)
-    # 3857 → lon/lat
     import geopandas as gpd
     from shapely.geometry import Point
 
-    g = gpd.GeoDataFrame(geometry=[Point(x, y) for x, y in arr_m], crs=3857).to_crs(4326)
+    g = gpd.GeoDataFrame(
+        geometry=[Point(x, y) for x, y in arr_m], crs=projection
+    ).to_crs(4326)
     return np.column_stack([g.geometry.y, g.geometry.x])  # lat, lon
 
 
-def _min_dist_m(cand_m: np.ndarray, existing_m: np.ndarray) -> np.ndarray:
-    """Pairwise min distance from each cand to existing (meters, EPSG:3857)."""
-    if len(cand_m) == 0:
+def _min_dist_m(cand_ll: np.ndarray, existing_ll: np.ndarray) -> np.ndarray:
+    """Minimum WGS84 geodesic distance from each candidate to references."""
+    cand_ll = np.asarray(cand_ll, dtype=float)
+    existing_ll = np.asarray(existing_ll, dtype=float)
+    if len(cand_ll) == 0:
         return np.zeros(0, dtype=float)
-    if len(existing_m) == 0:
-        return np.full(len(cand_m), np.inf)
-    # chunk to limit memory
-    out = np.empty(len(cand_m), dtype=float)
-    chunk = 2000
-    for i in range(0, len(cand_m), chunk):
-        sl = cand_m[i : i + chunk]
-        d = np.linalg.norm(sl[:, None, :] - existing_m[None, :, :], axis=2)
-        out[i : i + chunk] = d.min(axis=1)
+    if len(existing_ll) == 0:
+        return np.full(len(cand_ll), np.inf)
+    out = np.empty(len(cand_ll), dtype=float)
+    n_ref = len(existing_ll)
+    for i in range(0, len(cand_ll), 500):
+        sl = cand_ll[i : i + 500]
+        n_cand = len(sl)
+        _, _, distances = WGS84_GEOD.inv(
+            np.repeat(sl[:, 1], n_ref),
+            np.repeat(sl[:, 0], n_ref),
+            np.tile(existing_ll[:, 1], n_cand),
+            np.tile(existing_ll[:, 0], n_cand),
+        )
+        out[i : i + n_cand] = (
+            np.asarray(distances).reshape(n_cand, n_ref).min(axis=1)
+        )
     return out
 
 
 def _greedy_select_by_gap(
     cand_ll: np.ndarray,
-    existing_m: np.ndarray,
+    existing_ll: np.ndarray,
     n_take: int,
     *,
     min_dist_m: float,
@@ -345,23 +348,22 @@ def _greedy_select_by_gap(
     if n_take <= 0 or len(cand_ll) == 0:
         return [], [], np.zeros(0)
     mutual = min_dist_m if mutual_min_m is None else mutual_min_m
-    cand_m = _to_epsg3857_meters(cand_ll[:, 0], cand_ll[:, 1])
-    dmin = _min_dist_m(cand_m, existing_m)
+    dmin = _min_dist_m(cand_ll, existing_ll)
     ok = np.where(dmin >= min_dist_m)[0]
     if len(ok) == 0:
         return [], [], dmin
     order = ok[np.argsort(-dmin[ok])]  # largest gap first
     chosen_idx: list[int] = []
-    chosen_m = existing_m.copy()
+    chosen_ll = existing_ll.copy()
     for idx in order:
         if len(chosen_idx) >= n_take:
             break
-        p = cand_m[idx]
-        if len(chosen_m):
-            if float(np.linalg.norm(chosen_m - p, axis=1).min()) < mutual:
+        point = cand_ll[idx : idx + 1]
+        if len(chosen_ll):
+            if float(_min_dist_m(point, chosen_ll)[0]) < mutual:
                 continue
         chosen_idx.append(int(idx))
-        chosen_m = np.vstack([chosen_m, p])
+        chosen_ll = np.vstack([chosen_ll, point])
     lats = [float(cand_ll[i, 0]) for i in chosen_idx]
     lons = [float(cand_ll[i, 1]) for i in chosen_idx]
     return lats, lons, dmin
@@ -384,9 +386,9 @@ def densify_nevi(
     NEVI corridor (main): every ``spacing_m`` along interstate, drop sites
     within ``cluster_radius_m`` of existing hypernodes, take largest gaps.
 
-    Dose target = ceil(pct * |V|). If corridor candidates run out (common in
-    small states at 50%), remaining slots are filled with population-weighted
-    placement (same rule as CF-D-pop). Meta records n_nevi / n_pop_fill.
+    Dose target = ceil(pct * |V|). Only Interstate candidates are admitted.
+    If eligible candidates run out, the shortfall is recorded rather than
+    filled with off-corridor locations.
     """
     coords_ll, nodes = _node_coords(G)
     n0 = len(nodes)
@@ -394,36 +396,16 @@ def densify_nevi(
     if n_add == 0:
         return G.copy(), {"n_added": 0, "mode": "nevi", "pct": pct, "n_target": 0}
 
-    existing_m = _to_epsg3857_meters(coords_ll[:, 0], coords_ll[:, 1])
     bbox = _bbox_from_graph(G)
     roads = _load_interstate_clipped(bbox)
     cand_ll = _sample_along_lines(roads, spacing_m=spacing_m)
     lats, lons, dmin = _greedy_select_by_gap(
-        cand_ll, existing_m, n_add, min_dist_m=cluster_radius_m
+        cand_ll, coords_ll, n_add, min_dist_m=cluster_radius_m
     )
     n_nevi = len(lats)
-    n_short = n_add - n_nevi
-    n_pop_fill = 0
-    fill_note = ""
+    n_short = max(0, n_add - n_nevi)
 
     H = _add_cf_nodes(G, lats, lons, prefix="cf_nevi", rule="nevi")
-
-    if n_short > 0:
-        # Fill remainder with population-weighted sites on the partially densified graph
-        H_fill, meta_fill = densify_pop(
-            H,
-            pct=0.0,
-            cluster_radius_m=cluster_radius_m,
-            member_state_abbrs=member_state_abbrs,
-            seed=int(seed) + 17,
-            n_add_exact=n_short,
-        )
-        # densify_pop rebuilds from H; count new nodes
-        n_pop_fill = int(meta_fill.get("n_added", 0))
-        H = H_fill
-        fill_note = (
-            f" Corridor shortfall {n_short}; filled {n_pop_fill} via population-weighted rule."
-        )
 
     meta = {
         "mode": "nevi",
@@ -431,10 +413,10 @@ def densify_nevi(
         "pct": float(pct),
         "n_base": n0,
         "n_target": n_add,
-        "n_added": int(n_nevi + n_pop_fill),
+        "n_added": int(n_nevi),
         "n_nevi": int(n_nevi),
-        "n_pop_fill": int(n_pop_fill),
-        "n_shortfall_before_fill": int(max(0, n_short)),
+        "n_shortfall": int(n_short),
+        "realized_pct": float(n_nevi / n0) if n0 else 0.0,
         "n_candidates": int(len(cand_ll)),
         "n_candidates_eligible": int((dmin >= cluster_radius_m).sum()) if len(dmin) else 0,
         "spacing_m": float(spacing_m),
@@ -446,10 +428,9 @@ def densify_nevi(
         "seed": int(seed),
         "note": (
             "NEVI-style: points every 50 mi on interstate corridors; "
-            "exclude <10 km from existing hypernodes; dose = ceil(pct*|V|). "
-            "If corridor candidates are exhausted, remaining slots use "
-            "population-weighted placement."
-            + fill_note
+            "exclude <10 km from existing and newly added hypernodes; "
+            "dose target = ceil(pct*|V|). Corridor shortfalls are reported "
+            "and never filled off-corridor."
         ),
     }
     return H, meta
@@ -480,7 +461,7 @@ def densify_pop(
     if weights.sum() <= 0:
         weights = np.ones(len(counties), dtype=float)
     probs = weights / weights.sum()
-    existing_m = _to_epsg3857_meters(coords_ll[:, 0], coords_ll[:, 1])
+    existing_ll = coords_ll.copy()
 
     lats: list[float] = []
     lons: list[float] = []
@@ -499,18 +480,13 @@ def densify_pop(
             lat = float(rng.uniform(miny, maxy))
             if not poly.contains(Point(lon, lat)):
                 continue
-            cand_m = _to_epsg3857_meters(np.array([lat]), np.array([lon]))[0]
-            dmin = float(np.linalg.norm(existing_m - cand_m, axis=1).min())
+            candidate_ll = np.asarray([[lat, lon]], dtype=float)
+            dmin = float(_min_dist_m(candidate_ll, existing_ll)[0])
             if dmin < cluster_radius_m:
                 break
-            # mutual vs already chosen
-            if lats:
-                chosen_m = _to_epsg3857_meters(np.asarray(lats), np.asarray(lons))
-                if float(np.linalg.norm(chosen_m - cand_m, axis=1).min()) < cluster_radius_m:
-                    break
             lats.append(lat)
             lons.append(lon)
-            existing_m = np.vstack([existing_m, cand_m])
+            existing_ll = np.vstack([existing_ll, candidate_ll])
             break
 
     H = _add_cf_nodes(G, lats, lons, prefix="cf_pop", rule="pop")
@@ -563,7 +539,7 @@ def densify_uniform(
     if areas.sum() <= 0:
         areas = np.ones(len(counties), dtype=float)
     probs = areas / areas.sum()
-    existing_m = _to_epsg3857_meters(coords_ll[:, 0], coords_ll[:, 1])
+    existing_ll = coords_ll.copy()
 
     lats: list[float] = []
     lons: list[float] = []
@@ -581,17 +557,13 @@ def densify_uniform(
             lat = float(rng.uniform(miny, maxy))
             if not poly.contains(Point(lon, lat)):
                 continue
-            cand_m = _to_epsg3857_meters(np.array([lat]), np.array([lon]))[0]
-            dmin = float(np.linalg.norm(existing_m - cand_m, axis=1).min())
+            candidate_ll = np.asarray([[lat, lon]], dtype=float)
+            dmin = float(_min_dist_m(candidate_ll, existing_ll)[0])
             if dmin < cluster_radius_m:
                 break
-            if lats:
-                chosen_m = _to_epsg3857_meters(np.asarray(lats), np.asarray(lons))
-                if float(np.linalg.norm(chosen_m - cand_m, axis=1).min()) < cluster_radius_m:
-                    break
             lats.append(lat)
             lons.append(lon)
-            existing_m = np.vstack([existing_m, cand_m])
+            existing_ll = np.vstack([existing_ll, candidate_ll])
             break
 
     H = _add_cf_nodes(G, lats, lons, prefix="cf_null", rule="uniform")
@@ -759,7 +731,7 @@ def load_or_build_densified(
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "wb") as f:
         pickle.dump({"network": H, "meta": meta}, f)
-    # Sidecar for smoke tests (n_nevi + n_pop_fill == n_target)
+    # Sidecar records the target, achieved corridor dose, and any shortfall.
     meta_path = path.with_suffix(".meta.json")
     try:
         meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")

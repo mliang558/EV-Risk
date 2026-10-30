@@ -9,8 +9,8 @@ canonical state-ranking analysis.
 | Family | Doses | Role |
 | --- | --- | --- |
 | `baseline` | 0 | Reference |
-| `CF-D` | 0, 10, 20, 30, 50% | NEVI-style interstate corridor node expansion |
-| `CF-S` | 0, 10, 20, 30, 50% | Outage-severity comparator |
+| `CF-D` | 0, 10, 20, 30, 50% | NEVI-style Interstate corridor node expansion |
+| `CF-S` | 0, 10, 20, 30, 50% | Reduction in customers affected per event |
 | `CF-D-pop` | 10, 20, 30, 50% | Optional population-placement appendix control |
 | `CF-D-null` | 10, 20, 30, 50%, 10 replicates | Optional uniform-placement appendix control |
 
@@ -33,38 +33,27 @@ The population epicenter file and interstate shapefile must already exist. See
 
 ## Recommended execution
 
-Use the repository-level entry point:
+Run the two retained intervention experiments directly with Python. The same
+pooled Bayesian outage draw is reused across the baseline and every dose in a
+Monte Carlo replication.
 
 ```bash
-# TX/VT smoke tests plus Batch 2 smoke tests
-bash analysis/attack_under_PO/run_review_experiments_cluster.sh smoke
+python -u analysis/attack_under_PO/counterfactual_batch1/run_batch1_parallel.py --families baseline,CF-D,CF-S --check-only
 
-# Full intervention run only
-N_SIMS=100 WORKERS=45 \
-  bash analysis/attack_under_PO/run_review_experiments_cluster.sh intervention
-
-# Optional placement controls
-N_SIMS=100 WORKERS=45 \
-  bash analysis/attack_under_PO/run_review_experiments_cluster.sh placement
+python -u analysis/attack_under_PO/counterfactual_batch1/run_batch1_parallel.py --network-root outputs/1029-network-data-preprocessing-10km-geodesic-2018-2023 --network-year 2023 --densify-cache outputs/1029-network-nevi-expansion-2023 --out results_interventions_1029_network2023_pooled2018_2023 --families baseline,CF-D,CF-S --n-sims 100 --workers 45 --no-events
 ```
 
-Direct invocation remains available:
-
-```bash
-N_SIMS=100 WORKERS=45 NO_EVENTS=1 \
-  OUT=$PWD/results_cf_batch1_2023_pooled \
-  FAMILIES=baseline,CF-D,CF-S \
-  bash analysis/attack_under_PO/counterfactual_batch1/run_batch1_cluster.sh
-```
+For a quick TX smoke test, add `--only TX --n-sims 2 --workers 1` and use a
+separate output directory.
 
 ## Analysis
 
 ```bash
 python analysis/attack_under_PO/counterfactual_batch1/analyze_dose_response.py \
-  --batch-dir results_cf_batch1_2023_pooled
+  --batch-dir results_interventions_1029_network2023_pooled2018_2023
 
 python analysis/attack_under_PO/counterfactual_batch1/audit_cf_d_denominator.py \
-  --batch-dir results_cf_batch1_2023_pooled
+  --batch-dir results_interventions_1029_network2023_pooled2018_2023
 ```
 
 The first command requires exactly five unique doses for CF-D and CF-S. The second
@@ -75,6 +64,7 @@ reports both node-normalized loss `L` and total loss `W = L * scenario node coun
 - The graph is spatially constructed but global efficiency is unweighted.
 - CF-D means NEVI-style corridor expansion, not exact NEVI compliance.
 - New nodes are outage targets but never outage epicenters.
-- CF-D can use population fill when interstate candidates are insufficient.
+- CF-D never fills corridor shortfalls with off-corridor population sites;
+  achieved node additions and shortfalls are recorded for every unit and dose.
 - Report both `L` and `W`; adding nodes mechanically changes the denominator of `L`.
 - Placement controls support a relative comparison only after their full results exist.

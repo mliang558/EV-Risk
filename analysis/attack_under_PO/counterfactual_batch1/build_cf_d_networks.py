@@ -30,8 +30,10 @@ from counterfactual_batch1.densify_network import (  # noqa: E402
 from counterfactual_batch1.scenarios import DOSE_PCTS  # noqa: E402
 from compute_impact_radius import STATE_NAME_TO_ABBR  # noqa: E402
 
-DEFAULT_NETWORK_ROOT = ROOT / "outputs" / "network_graph_10km_2018_2026"
-DEFAULT_CACHE = ROOT / "outputs" / "network_graph_cf_densify_2023"
+DEFAULT_NETWORK_ROOT = (
+    ROOT / "outputs" / "1029-network-data-preprocessing-10km-geodesic-2018-2023"
+)
+DEFAULT_CACHE = ROOT / "outputs" / "1029-network-nevi-expansion-2023"
 NETWORK_YEAR = 2023
 
 

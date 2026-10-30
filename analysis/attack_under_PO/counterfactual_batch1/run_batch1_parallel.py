@@ -3,7 +3,7 @@
 Parallel launcher for Counterfactual Batch 1 (2023 × pooled outages).
 
 Does NOT write into results_mc_10km_panel_2018_2026/.
-Default out: results_cf_batch1_2023_pooled/
+Default out: results_interventions_1029_network2023_pooled2018_2023/
 
 Usage (cluster):
   export PYTHONPATH="$ROOT/analysis:$ROOT/analysis/attack_under_PO"
@@ -13,7 +13,7 @@ Usage (cluster):
 Priority families: baseline,CF-D (NEVI),CF-S (N_affected),U,K
 # Requires: data/processed/pop_units_epicenter.gpkg (census-tract epicenters)
 # Optional: CF-D-pop, CF-D-null; EPICENTER_MODE=station only for appendix ablation
-# Base nets: reuse outputs/network_graph_10km_2018_2026/2023 (do not rebuild).
+# Base nets: reuse the validated 1029 canonical network for 2023.
 # Epicenters: census-tract population only (never station-KDE).
 Optional appendix controls: CF-D-pop,CF-D-null
 """
@@ -29,6 +29,16 @@ import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
+# One analytical unit is assigned to each process. Keep numerical libraries
+# single-threaded so --workers controls the total CPU allocation.
+for variable in (
+    "OMP_NUM_THREADS",
+    "MKL_NUM_THREADS",
+    "OPENBLAS_NUM_THREADS",
+    "NUMEXPR_NUM_THREADS",
+):
+    os.environ.setdefault(variable, "1")
+
 ROOT = Path(__file__).resolve().parents[3]
 ATTACK = Path(__file__).resolve().parents[1]
 PKG = Path(__file__).resolve().parent
@@ -39,12 +49,14 @@ for p in (ROOT, ATTACK, PKG.parent):
 from region_merge_config import ABBR_TO_STATE_NAME  # noqa: E402
 from counterfactual_batch1.scenarios import batch1_scenarios, filter_scenarios  # noqa: E402
 
-DEFAULT_NETWORK_ROOT = ROOT / "outputs" / "network_graph_10km_2018_2026"
+DEFAULT_NETWORK_ROOT = (
+    ROOT / "outputs" / "1029-network-data-preprocessing-10km-geodesic-2018-2023"
+)
 DEFAULT_K5KM_ROOT = ROOT / "outputs" / "network_graph_5km_2018_2026"
-DEFAULT_OUT = ROOT / "results_cf_batch1_2023_pooled"
-DEFAULT_DENSIFY_CACHE = ROOT / "outputs" / "network_graph_cf_densify_2023"
+DEFAULT_OUT = ROOT / "results_interventions_1029_network2023_pooled2018_2023"
+DEFAULT_DENSIFY_CACHE = ROOT / "outputs" / "1029-network-nevi-expansion-2023"
 NETWORK_YEAR = 2023
-RUN_LABEL = os.environ.get("ATTACK_RUN_LABEL", "CF-B1")
+RUN_LABEL = "Intervention experiments"
 
 
 def _default_workers() -> int:
@@ -206,7 +218,12 @@ def _write_panel(out_root: Path) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Baseline/CF runner (network year × pooled outages)")
+    parser = argparse.ArgumentParser(
+        description=(
+            "Compare 2023 baseline, NEVI-style corridor expansion, and "
+            "outage-severity reduction using shared pooled-outage draws."
+        )
+    )
     parser.add_argument("--network-root", type=str, default=str(DEFAULT_NETWORK_ROOT))
     parser.add_argument("--network-year", type=int, default=NETWORK_YEAR)
     parser.add_argument("--k5km-root", type=str, default=str(DEFAULT_K5KM_ROOT))
@@ -232,7 +249,16 @@ def main() -> None:
     )
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--no-events", action="store_true", help="Skip per-event gz dumps")
+    parser.add_argument(
+        "--check-only",
+        action="store_true",
+        help="Validate required inputs and exit without running simulations.",
+    )
     args = parser.parse_args()
+
+    fam = {x.strip() for x in args.families.split(",") if x.strip()} or None
+    keyset = {x.strip() for x in args.keys.split(",") if x.strip()} or None
+    sc = filter_scenarios(batch1_scenarios(), fam, keyset)
 
     network_root = Path(args.network_root)
     if not network_root.is_absolute():
@@ -247,6 +273,37 @@ def main() -> None:
     if not k5km_root.is_absolute():
         k5km_root = ROOT / k5km_root
 
+    required = {
+        "2023 network summary": network_root / str(args.network_year) / "network_summary.csv",
+        "county-rate posterior": ROOT / "advi_results_2018_2023" / "county_advi_posterior.nc",
+        "county-rate table": ROOT / "advi_results_2018_2023" / "county_estimates_advi.csv",
+        "cleaned outage events": (
+            ROOT / "notebooks" / "PO_data_cleaning" / "cleaned_outages_2018_2023.csv"
+        ),
+        "county customer counts": ROOT / "notebooks" / "PO_data_cleaning" / "MCC.csv",
+    }
+    missing = [f"{label}: {path}" for label, path in required.items() if not path.is_file()]
+    population_candidates = (
+        ROOT / "data" / "processed" / "pop_units_epicenter.gpkg",
+        ROOT / "data" / "processed" / "pop_units_epicenter.parquet",
+    )
+    if not any(path.is_file() for path in population_candidates):
+        missing.append(
+            "population epicenters: " + " or ".join(str(path) for path in population_candidates)
+        )
+    if missing:
+        raise FileNotFoundError("Missing intervention inputs:\n  " + "\n  ".join(missing))
+    if any(s.family == "CF-D" for s in sc):
+        from counterfactual_batch1.densify_network import resolve_interstate_shapefile
+
+        interstate_path = resolve_interstate_shapefile()
+        print(f"OK  Interstate corridors: {interstate_path}")
+    print(f"OK  canonical network: {network_root / str(args.network_year)}")
+    print("OK  pooled Bayesian rates and 2018-2023 historical event pool")
+    if args.check_only:
+        print("PASS: intervention inputs are complete")
+        return
+
     out_root.mkdir(parents=True, exist_ok=True)
     densify_cache.mkdir(parents=True, exist_ok=True)
 
@@ -256,13 +313,10 @@ def main() -> None:
         raise SystemExit("No jobs.")
 
     workers = args.workers if args.workers is not None else _default_workers()
-    fam = {x.strip() for x in args.families.split(",") if x.strip()} or None
-    keyset = {x.strip() for x in args.keys.split(",") if x.strip()} or None
-    sc = filter_scenarios(batch1_scenarios(), fam, keyset)
 
     manifest = {
         "batch": "network_year_pooled_outages",
-        "analysis_role": "canonical" if args.network_year == 2023 else "longitudinal",
+        "analysis_role": "prospective_counterfactual_intervention",
         "created_utc": datetime.now(timezone.utc).isoformat(),
         "network_year": args.network_year,
         "outage_pool": "pooled_2018_2023",
@@ -276,8 +330,12 @@ def main() -> None:
         "efficiency_denominator": "fixed baseline N*(N-1) after node removal",
         "event_loss": "((E0-E_after)/E0) * duration_hours",
         "annual_loss_W": "sum(event_loss)",
-        "reported_L_tilde": "annual_loss_W / baseline_n_nodes",
+        "reported_L_tilde": "annual_loss_W / scenario_n_nodes",
         "cf_s_definition": "N_affected -x% => R_c *= sqrt(1-x)",
+        "cf_d_definition": (
+            "strict Interstate-corridor placement at 50-mile candidates; "
+            "no off-corridor population fill; shortfalls retained"
+        ),
         "n_sims": args.n_sims,
         "workers_requested": int(workers),
         "workers_used": int(max(1, min(int(workers), len(jobs)))),
@@ -358,6 +416,9 @@ def main() -> None:
         f"[{RUN_LABEL}] done ok={ok} skip={skip} other={len(results)-ok-skip} "
         f"in {(time.time()-t0)/60:.1f} min"
     )
+    other = len(results) - ok - skip
+    if other:
+        raise RuntimeError(f"Intervention run ended with {other} incomplete units")
 
 
 if __name__ == "__main__":

@@ -630,7 +630,7 @@ def run_unit_batch1(
             row["delta_L_tilde"] = float("nan")
             row["delta_L_tilde_pct"] = float("nan")
 
-    # Collect densify metas for smoke (NEVI n_nevi + n_pop_fill)
+    # Collect placement metadata, including strict-corridor shortfalls.
     densify_metas: dict[str, dict] = {}
     for sc in active:
         if sc.densify_pct is not None and sc.densify_mode:
@@ -652,14 +652,14 @@ def run_unit_batch1(
                     "n_target",
                     "n_added",
                     "n_nevi",
-                    "n_pop_fill",
                     "n_base",
-                    "n_shortfall_before_fill",
+                    "n_shortfall",
+                    "realized_pct",
                     "intervention",
                     "note",
                     "replicate",
                 )
-                if k in meta or k in ("n_nevi", "n_pop_fill", "n_target", "n_added")
+                if k in meta or k in ("n_nevi", "n_target", "n_added", "n_shortfall")
             }
 
     pd.DataFrame(summary_rows).to_csv(summary_path, index=False)

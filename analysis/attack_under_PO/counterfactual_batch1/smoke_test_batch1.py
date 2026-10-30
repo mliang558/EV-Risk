@@ -9,7 +9,7 @@ Checks
 2. Monotonicity: CF-S L non-increasing in dose; CF-D hit non-decreasing in dose.
 3. P(hit) magnitude (warn if ~0 or ~1).
 4. K uses 5 km net: |V|_K >> |V|_10km.
-5. NEVI meta: n_nevi + n_pop_fill == n_target (== n_added).
+5. NEVI meta: n_added == n_nevi <= n_target, with shortfalls reported.
 6. Optional: merged-unit tract population coverage; fallback events on small states.
 
 Usage
@@ -289,7 +289,7 @@ def check_p_hit(unit_dir: Path, r: CheckResult) -> None:
 
 
 def check_nevi_meta(unit_dir: Path, densify_cache: Path | None, r: CheckResult) -> None:
-    print("\n[4] NEVI meta: n_nevi + n_pop_fill == n_target")
+    print("\n[4] NEVI meta: strict corridor additions and reported shortfalls")
     meta_path = unit_dir / "densify_meta.json"
     metas: dict = {}
     if meta_path.is_file():
@@ -325,18 +325,18 @@ def check_nevi_meta(unit_dir: Path, densify_cache: Path | None, r: CheckResult) 
             continue
         any_nevi = True
         n_nevi = int(m.get("n_nevi") or 0)
-        n_fill = int(m.get("n_pop_fill") or 0)
         n_tgt = int(m.get("n_target") or m.get("n_added") or -1)
-        n_add = int(m.get("n_added") or (n_nevi + n_fill))
-        ok = (n_nevi + n_fill == n_add) and (n_tgt < 0 or n_add == n_tgt or n_add <= n_tgt)
-        # allow n_add < n_target if both corridor+pop exhausted
+        n_add = int(m.get("n_added") or n_nevi)
+        n_short = int(m.get("n_shortfall") or max(0, n_tgt - n_add))
         msg = (
-            f"{key}: n_nevi={n_nevi} + n_pop_fill={n_fill} = {n_nevi + n_fill} "
-            f"(n_added={n_add}, n_target={n_tgt})"
+            f"{key}: n_nevi={n_nevi}, n_added={n_add}, "
+            f"n_target={n_tgt}, n_shortfall={n_short}"
         )
-        if n_nevi + n_fill == n_add and (n_tgt < 0 or n_add <= n_tgt):
+        if n_nevi == n_add and (n_tgt < 0 or n_add <= n_tgt) and (
+            n_tgt < 0 or n_short == n_tgt - n_add
+        ):
             if n_add < n_tgt:
-                r.warn_(msg + " — shortfall after pop fill (candidates exhausted)")
+                r.warn_(msg + " — eligible corridor candidates exhausted")
             else:
                 r.pass_(msg)
         else:

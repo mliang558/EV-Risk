@@ -45,7 +45,7 @@ def _check_common_draws(unit_dir: Path, checks: Checks) -> None:
     baseline = _events(unit_dir, "baseline")
     columns = ["sim_id", "event_id", "epicenter_lat", "epicenter_lon"]
     base_duration = baseline["duration_hours"].to_numpy()
-    for family in ("CF-D_nevi_p", "CF-S_m"):
+    for family in ("CF-D_nevi_p", "Demand_p", "CF-S_m"):
         for dose in DOSES:
             scenario = f"{family}{dose}"
             events = _events(unit_dir, scenario)
@@ -55,9 +55,14 @@ def _check_common_draws(unit_dir: Path, checks: Checks) -> None:
             same_duration = same_rows and np.allclose(duration, base_duration)
             checks.check(same_draw and same_duration, f"{scenario}: shared events and epicenters")
 
-    baseline_loss = _metrics(unit_dir, "baseline")["L_tilde"].to_numpy()
-    for scenario in ("CF-D_nevi_p0", "CF-S_m0"):
-        loss = _metrics(unit_dir, scenario)["L_tilde"].to_numpy()
+    baseline_metrics = _metrics(unit_dir, "baseline")
+    baseline_loss = baseline_metrics["L_original"].to_numpy()
+    checks.check(
+        np.allclose(baseline_metrics["L_original"], baseline_metrics["L_tilde"]),
+        "baseline original-node metric equals the ordinary baseline metric",
+    )
+    for scenario in ("CF-D_nevi_p0", "Demand_p0", "CF-S_m0"):
+        loss = _metrics(unit_dir, scenario)["L_original"].to_numpy()
         checks.check(
             np.allclose(loss, baseline_loss, atol=1e-12, rtol=0),
             f"{scenario}: dose zero equals baseline",
@@ -66,7 +71,7 @@ def _check_common_draws(unit_dir: Path, checks: Checks) -> None:
 
 def _check_dose_response(unit_dir: Path, checks: Checks) -> None:
     severity_loss = [
-        _metrics(unit_dir, f"CF-S_m{dose}")["L_tilde"].mean() for dose in DOSES
+        _metrics(unit_dir, f"CF-S_m{dose}")["L_original"].mean() for dose in DOSES
     ]
     checks.check(
         all(a + 1e-12 >= b for a, b in zip(severity_loss, severity_loss[1:])),
@@ -89,6 +94,16 @@ def _check_dose_response(unit_dir: Path, checks: Checks) -> None:
     checks.check(
         baseline["P_hit"].between(0, 1).all(),
         "baseline hit probabilities are valid",
+    )
+    reference_counts = []
+    for prefix in ("CF-D_nevi_p", "Demand_p", "CF-S_m"):
+        for dose in DOSES:
+            reference_counts.extend(
+                _metrics(unit_dir, f"{prefix}{dose}")["n_reference_nodes"].unique()
+            )
+    checks.check(
+        len(set(reference_counts + baseline["n_reference_nodes"].unique().tolist())) == 1,
+        "all scenarios use the same original 2023 node set",
     )
 
 
@@ -124,6 +139,30 @@ def _check_corridor_metadata(unit_dir: Path, checks: Checks) -> None:
         checks.check(
             all(value is None or float(value) >= 10_000 - 1e-6 for value in distances),
             f"{key}: added sites respect the 10 km separation rule",
+        )
+        demand_key = f"Demand_p{dose}"
+        demand = metadata[demand_key]
+        checks.check(
+            int(demand["n_added"]) == added
+            and int(demand["n_target"]) == added
+            and int(demand["n_shortfall"]) == 0,
+            f"{demand_key}: node count exactly matches the corridor scenario",
+        )
+        checks.check(
+            demand.get("mode") == "population_demand_matched"
+            and int(demand.get("n_candidates_eligible", 0)) >= added,
+            f"{demand_key}: population-targeted placement is recorded",
+        )
+        demand_distances = [
+            demand.get("min_distance_to_existing_m"),
+            demand.get("min_distance_between_added_m"),
+        ]
+        checks.check(
+            all(
+                value is None or float(value) >= 10_000 - 1e-6
+                for value in demand_distances
+            ),
+            f"{demand_key}: added sites respect the 10 km separation rule",
         )
 
 

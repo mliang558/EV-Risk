@@ -27,7 +27,7 @@ NPROC_ALL="$(nproc --all 2>/dev/null || nproc 2>/dev/null || echo 8)"
 WORKERS="${WORKERS:-$NPROC_ALL}"
 # Review set: one mitigation experiment plus one severity comparator.
 # Placement controls are opt-in with FAMILIES=baseline,CF-D,CF-D-pop,CF-D-null,CF-S.
-FAMILIES="${FAMILIES:-baseline,CF-D,CF-S}"
+FAMILIES="${FAMILIES:-baseline,CF-D,Demand,CF-S}"
 ONLY="${ONLY:-}"
 EPICENTER_MODE="${EPICENTER_MODE:-population}"
 # Full panel: skip per-event gz (huge I/O). Safe for §4.3:

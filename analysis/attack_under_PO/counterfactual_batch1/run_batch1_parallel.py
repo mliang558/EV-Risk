@@ -242,7 +242,7 @@ def main() -> None:
     parser.add_argument("--only", default="", help="Comma-separated analytical units")
     parser.add_argument(
         "--families",
-        default="baseline,CF-D,CF-S",
+        default="baseline,CF-D,Demand,CF-S",
         help="Comma-separated scenario families",
     )
     parser.add_argument(
@@ -298,11 +298,19 @@ def main() -> None:
         ),
         "event_reset": "restore the original scenario network after every event",
         "global_efficiency": "unweighted, with the original-node denominator fixed after removal",
+        "primary_intervention_metric": (
+            "loss among the original 2023 hypernodes; added nodes may serve as paths "
+            "but are excluded from the endpoint set and denominator"
+        ),
         "corridor_intervention": (
             "FHWA-designated EV Alternative Fuel Corridor candidates sampled every "
             "50 miles and kept at least 10 km from all existing and added hypernodes"
         ),
         "corridor_source": afc,
+        "demand_comparator": (
+            "add exactly the corridor scenario's realized number of nodes, prioritizing "
+            "high-population census tracts with the same 10 km separation rule"
+        ),
         "severity_intervention": "reduce affected customers, then recompute capped radius",
         "scenarios": [scenario.key for scenario in scenarios],
         "n_sims": args.n_sims,

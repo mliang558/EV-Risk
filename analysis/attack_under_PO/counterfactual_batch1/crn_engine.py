@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Common-random-number engine for the two intervention experiments.
+"""Common-random-number engine for the intervention experiments.
 
 Each replication draws outage rates, events, and epicenters once. The baseline,
-corridor networks, and severity doses are evaluated on that shared event list.
+corridor, demand-targeted, and severity scenarios use that shared event list.
 """
 
 from __future__ import annotations
@@ -53,7 +53,10 @@ from select_epicenter_by_population import (
     require_pop_units,
 )
 
-from counterfactual_batch1.densify_network import load_or_build_densified
+from counterfactual_batch1.densify_network import (
+    load_or_build_demand,
+    load_or_build_densified,
+)
 from counterfactual_batch1.scenarios import Scenario
 
 
@@ -265,13 +268,48 @@ def _effective_radius(
     return r
 
 
+def _reference_network_metrics(
+    graph: nx.Graph,
+    reference_nodes: frozenset,
+) -> tuple[float, float]:
+    """Efficiency and LCC measured only over the original network nodes.
+
+    Added nodes may be used along a shortest path, but they are not endpoints
+    and do not enter either denominator. Removed or disconnected original-node
+    pairs contribute zero.
+    """
+    n_reference = len(reference_nodes)
+    if n_reference < 2:
+        return 0.0, 0.0
+    present = reference_nodes.intersection(graph.nodes)
+    inverse_distance_sum = 0.0
+    for source in present:
+        lengths = nx.single_source_shortest_path_length(graph, source)
+        inverse_distance_sum += sum(
+            1.0 / distance
+            for target, distance in lengths.items()
+            if target != source and target in reference_nodes and distance > 0
+        )
+    efficiency = inverse_distance_sum / (n_reference * (n_reference - 1))
+    if not present:
+        return float(efficiency), 0.0
+    largest_reference_component = max(
+        sum(node in reference_nodes for node in component)
+        for component in nx.connected_components(graph.to_undirected())
+    )
+    return float(efficiency), largest_reference_component / n_reference
+
+
 def evaluate_events_on_graph(
     *,
     events: pd.DataFrame,
     G: nx.Graph,
     E0: float,
     scenario: Scenario,
+    reference_nodes: frozenset,
+    reference_efficiency_before: float,
     removal_cache: dict | None = None,
+    reference_cache: dict | None = None,
     graph_id: str | None = None,
 ) -> pd.DataFrame:
     """Apply one scenario to a shared CRN event table; return event-level rows."""
@@ -324,7 +362,38 @@ def evaluate_events_on_graph(
         if hit == 0:
             eff_loss = 0.0
             pct_loss = 0.0
+            reference_eff_after = reference_efficiency_before
+            reference_lcc_frac = 1.0
+        else:
+            reference_key = (gid, frozenset(affected))
+            if reference_cache is not None and reference_key in reference_cache:
+                reference_eff_after, reference_lcc_frac = reference_cache[reference_key]
+                if isinstance(reference_cache, OrderedDict):
+                    reference_cache.move_to_end(reference_key)
+            else:
+                attacked = G.copy()
+                attacked.remove_nodes_from(affected)
+                reference_eff_after, reference_lcc_frac = _reference_network_metrics(
+                    attacked, reference_nodes
+                )
+                if reference_cache is not None:
+                    reference_cache[reference_key] = (
+                        reference_eff_after,
+                        reference_lcc_frac,
+                    )
+                    if isinstance(reference_cache, OrderedDict):
+                        reference_cache.move_to_end(reference_key)
+                        while len(reference_cache) > max(100, cache_max):
+                            reference_cache.popitem(last=False)
+        reference_pct_loss = (
+            (reference_efficiency_before - reference_eff_after)
+            / reference_efficiency_before
+            if reference_efficiency_before > 0
+            else 0.0
+        )
+        reference_pct_loss = max(0.0, float(reference_pct_loss))
         lcc_deficit = max(0.0, 1.0 - float(lcc_frac))
+        reference_lcc_deficit = max(0.0, 1.0 - float(reference_lcc_frac))
         rel_loss_x_duration = float(pct_loss) * duration_h
         rel_lcc_loss_x_duration = lcc_deficit * duration_h
         nd = float(row.get("Nd", row.get("affected_customers", 0.0)) or 0.0)
@@ -356,6 +425,12 @@ def evaluate_events_on_graph(
                 "eff_loss": float(eff_loss),
                 "rel_loss_x_duration": float(rel_loss_x_duration),
                 "rel_lcc_loss_x_duration": float(rel_lcc_loss_x_duration),
+                "reference_efficiency_before": float(reference_efficiency_before),
+                "reference_efficiency_after": float(reference_eff_after),
+                "pct_eff_loss_original": reference_pct_loss,
+                "rel_loss_original_x_duration": reference_pct_loss * duration_h,
+                "lcc_original_frac": float(reference_lcc_frac),
+                "rel_lcc_original_x_duration": reference_lcc_deficit * duration_h,
                 "lcc_frac": float(lcc_frac),
                 "affected_customers_base": nd,
                 "affected_customers_scenario": nd_scenario,
@@ -364,6 +439,7 @@ def evaluate_events_on_graph(
                     row.get("used_state_pool_fallback", False)
                 ),
                 "n_nodes": int(n_nodes),
+                "n_reference_nodes": int(len(reference_nodes)),
                 "baseline_efficiency": float(E0),
             }
         )
@@ -383,6 +459,14 @@ def aggregate_sim_metrics(event_df: pd.DataFrame) -> dict[str, Any]:
     n_zero = n_ev - n_hit
     p_hit = float(n_hit / n_ev) if n_ev > 0 else float("nan")
     L_event = total_rel / n_ev if n_ev > 0 else float("nan")
+    n_reference = int(event_df["n_reference_nodes"].iloc[0])
+    total_original = float(event_df["rel_loss_original_x_duration"].sum())
+    total_lcc_original = float(event_df["rel_lcc_original_x_duration"].sum())
+    L_original = total_original / n_reference if n_reference > 0 else float("nan")
+    L_lcc_original = (
+        total_lcc_original / n_reference if n_reference > 0 else float("nan")
+    )
+    L_event_original = total_original / n_ev if n_ev > 0 else float("nan")
     if n_hit > 0 and "hit" in event_df.columns:
         total_rel_hit = float(
             event_df.loc[event_df["hit"] == 1, "rel_loss_x_duration"].sum()
@@ -397,7 +481,11 @@ def aggregate_sim_metrics(event_df: pd.DataFrame) -> dict[str, Any]:
         "family": str(event_df["family"].iloc[0]),
         "n_events": n_ev,
         "n_nodes": n_nodes,
+        "n_reference_nodes": n_reference,
         "baseline_efficiency": float(event_df["baseline_efficiency"].iloc[0]),
+        "reference_baseline_efficiency": float(
+            event_df["reference_efficiency_before"].iloc[0]
+        ),
         "L_tilde": L_tilde,
         "L_lcc_tilde": L_lcc,
         "total_rel_loss_x_duration": total_rel,  # sum_i (ΔE/E · T_i)
@@ -409,6 +497,10 @@ def aggregate_sim_metrics(event_df: pd.DataFrame) -> dict[str, Any]:
         "n_hit_events": n_hit,
         "P_hit": p_hit,
         "L_event": L_event,
+        "L_original": L_original,
+        "L_lcc_original": L_lcc_original,
+        "L_event_original": L_event_original,
+        "total_rel_loss_original_x_duration": total_original,
         "E_loss_given_hit": E_loss_hit,
         "n_fallback_events": int(event_df["used_state_pool_fallback"].sum()),
         "max_disruption_radius_km": float(event_df["radius_km"].max()),
@@ -422,10 +514,33 @@ def resolve_graph_for_scenario(
     unit: str,
     densify_cache: Path,
     unit_boundary,
+    pop_units=None,
+    matched_target: int | None = None,
 ) -> tuple[nx.Graph, str, dict]:
-    """Return the baseline or cached corridor-expanded graph."""
-    if scenario.densify_pct is None:
+    """Return the baseline or one of the cached expanded graphs."""
+    if scenario.densify_pct is None and scenario.demand_pct is None:
         return G_base, "base_10km", {}
+    if scenario.demand_pct is not None:
+        if pop_units is None:
+            raise ValueError("Demand expansion requires census-tract population units")
+        if matched_target is None:
+            _, corridor_meta = load_or_build_densified(
+                G_base,
+                unit,
+                scenario.demand_pct,
+                densify_cache,
+                boundary=unit_boundary,
+            )
+            matched_target = int(corridor_meta.get("n_added", 0))
+        graph, meta = load_or_build_demand(
+            G_base,
+            unit,
+            scenario.demand_pct,
+            matched_target,
+            pop_units,
+            densify_cache,
+        )
+        return graph, scenario.network_variant, meta
     graph, meta = load_or_build_densified(
         G_base, unit, scenario.densify_pct, densify_cache, boundary=unit_boundary
     )
@@ -510,31 +625,48 @@ def run_unit_batch1(
         if hasattr(unit_geometry, "union_all")
         else unit_geometry.unary_union
     )
-    pop_gdf = (
-        require_pop_units(project_root)
-        if (epicenter_mode or "population").lower() == "population"
+    need_population = (
+        (epicenter_mode or "population").lower() == "population"
+        or any(sc.family == "Demand" for sc in scenarios)
+    )
+    pop_gdf = require_pop_units(project_root) if need_population else None
+    unit_pop = (
+        pop_gdf[pop_gdf["county_fips"].astype(str).str.zfill(5).isin(target_fips)].copy()
+        if pop_gdf is not None
         else None
     )
 
     # Preload / build graphs + cache E(G)
     # Epicenters always drawn once per sim (population/KDE on G_base); densified
     # graphs only for loss evaluation.
-    graph_cache: dict[str, tuple[nx.Graph, float, dict]] = {}
+    graph_cache: dict[str, tuple[nx.Graph, float, float, dict]] = {}
     scenario_variants: dict[str, str] = {}
+    original_nodes = frozenset(G_base.nodes)
+    corridor_added_by_dose: dict[float, int] = {}
     for sc in scenarios:
+        matched_target = corridor_added_by_dose.get(float(sc.dose_pct))
         G_sc, variant, meta = resolve_graph_for_scenario(
             sc,
             G_base=G_base,
             unit=unit,
             densify_cache=densify_cache,
             unit_boundary=unit_boundary,
+            pop_units=unit_pop,
+            matched_target=matched_target,
         )
+        if sc.family == "CF-D":
+            corridor_added_by_dose[float(sc.dose_pct)] = int(meta.get("n_added", 0))
         scenario_variants[sc.key] = variant
         if variant not in graph_cache:
             E0 = float(nx.global_efficiency(G_sc))
             if not np.isfinite(E0) or E0 <= 0:
                 raise ValueError(f"Invalid baseline efficiency for {unit}/{variant}: {E0}")
-            graph_cache[variant] = (G_sc, E0, meta)
+            reference_E0, _ = _reference_network_metrics(G_sc, original_nodes)
+            if not np.isfinite(reference_E0) or reference_E0 <= 0:
+                raise ValueError(
+                    f"Invalid original-node efficiency for {unit}/{variant}: {reference_E0}"
+                )
+            graph_cache[variant] = (G_sc, E0, reference_E0, meta)
 
     if not scenarios:
         return f"empty-scenarios:{unit}"
@@ -546,6 +678,7 @@ def run_unit_batch1(
     from collections import OrderedDict
 
     removal_cache: OrderedDict = OrderedDict()
+    reference_cache: OrderedDict = OrderedDict()
 
     t0 = time.time()
     for sim_id in range(n_sims):
@@ -568,7 +701,7 @@ def run_unit_batch1(
         if events.empty:
             for sc in scenarios:
                 variant = scenario_variants[sc.key]
-                G_use, E0, _ = graph_cache[variant]
+                G_use, E0, reference_E0, _ = graph_cache[variant]
                 metrics_by_sc[sc.key].append(
                     {
                         "sim_id": sim_id,
@@ -576,7 +709,9 @@ def run_unit_batch1(
                         "family": sc.family,
                         "n_events": 0,
                         "n_nodes": G_use.number_of_nodes(),
+                        "n_reference_nodes": len(original_nodes),
                         "baseline_efficiency": E0,
+                        "reference_baseline_efficiency": reference_E0,
                         "L_tilde": 0.0,
                         "L_lcc_tilde": 0.0,
                         "total_rel_loss_x_duration": 0.0,
@@ -588,6 +723,10 @@ def run_unit_batch1(
                         "n_hit_events": 0,
                         "P_hit": np.nan,
                         "L_event": np.nan,
+                        "L_original": 0.0,
+                        "L_lcc_original": 0.0,
+                        "L_event_original": np.nan,
+                        "total_rel_loss_original_x_duration": 0.0,
                         "E_loss_given_hit": np.nan,
                         "n_fallback_events": 0,
                         "max_disruption_radius_km": 0.0,
@@ -614,13 +753,16 @@ def run_unit_batch1(
 
         for sc in scenarios:
             variant = scenario_variants[sc.key]
-            G_use, E0, _ = graph_cache[variant]
+            G_use, E0, reference_E0, _ = graph_cache[variant]
             ev = evaluate_events_on_graph(
                 events=events,
                 G=G_use,
                 E0=E0,
                 scenario=sc,
+                reference_nodes=original_nodes,
+                reference_efficiency_before=reference_E0,
                 removal_cache=removal_cache,
+                reference_cache=reference_cache,
                 graph_id=variant,
             )
             if write_events:
@@ -646,6 +788,7 @@ def run_unit_batch1(
 
     summary_rows: list[dict] = []
     baseline_mean = None
+    baseline_original_mean = None
     for sc in scenarios:
         mdf = pd.DataFrame(metrics_by_sc[sc.key])
         mdf.to_csv(unit_out / f"metrics_{sc.key}.csv", index=False)
@@ -654,8 +797,10 @@ def run_unit_batch1(
                 unit_out / f"events_{sc.key}.csv.gz", index=False, compression="gzip"
             )
         mean_L = float(mdf["L_tilde"].mean()) if len(mdf) else float("nan")
+        mean_original = float(mdf["L_original"].mean()) if len(mdf) else float("nan")
         if sc.key == "baseline":
             baseline_mean = mean_L
+            baseline_original_mean = mean_original
         summary_rows.append(
             {
                 "unit": unit,
@@ -670,6 +815,11 @@ def run_unit_batch1(
                 "W_mean": float(mdf["total_rel_loss_x_duration"].mean()) if len(mdf) else float("nan"),
                 "P_hit_mean": float(mdf["P_hit"].mean()) if len(mdf) else float("nan"),
                 "L_event_mean": float(mdf["L_event"].mean()) if len(mdf) else float("nan"),
+                "L_original_mean": mean_original,
+                "L_original_std": float(mdf["L_original"].std(ddof=1)) if len(mdf) > 1 else float("nan"),
+                "L_lcc_original_mean": float(mdf["L_lcc_original"].mean()) if len(mdf) else float("nan"),
+                "L_event_original_mean": float(mdf["L_event_original"].mean()) if len(mdf) else float("nan"),
+                "n_reference_nodes": int(mdf["n_reference_nodes"].iloc[0]) if len(mdf) else len(original_nodes),
                 "E_loss_given_hit_mean": float(mdf["E_loss_given_hit"].mean()) if len(mdf) else float("nan"),
                 "n_events_mean": float(mdf["n_events"].mean()) if len(mdf) else float("nan"),
                 "n_nodes_mean": float(mdf["n_nodes"].mean()) if len(mdf) else float("nan"),
@@ -686,11 +836,27 @@ def run_unit_batch1(
         else:
             row["delta_L_tilde"] = float("nan")
             row["delta_L_tilde_pct"] = float("nan")
+        if (
+            baseline_original_mean is not None
+            and np.isfinite(baseline_original_mean)
+            and baseline_original_mean != 0
+        ):
+            row["delta_L_original"] = float(
+                row["L_original_mean"] - baseline_original_mean
+            )
+            row["delta_L_original_pct"] = float(
+                100.0
+                * (row["L_original_mean"] - baseline_original_mean)
+                / abs(baseline_original_mean)
+            )
+        else:
+            row["delta_L_original"] = float("nan")
+            row["delta_L_original_pct"] = float("nan")
 
     densify_metas = {}
     for sc in scenarios:
-        if sc.densify_pct is not None:
-            meta = graph_cache[scenario_variants[sc.key]][2]
+        if sc.densify_pct is not None or sc.demand_pct is not None:
+            meta = graph_cache[scenario_variants[sc.key]][3]
             densify_metas[sc.key] = {
                 k: meta.get(k)
                 for k in (
@@ -738,6 +904,7 @@ def run_unit_batch1(
         "git_commit": _git_commit(project_root),
         "write_events": bool(write_events),
         "removal_cache_entries": int(len(removal_cache)),
+        "reference_cache_entries": int(len(reference_cache)),
     }
     (unit_out / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     return f"ok:{unit}"

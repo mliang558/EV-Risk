@@ -14,12 +14,13 @@ class Scenario:
     dose_pct: float = 0.0
     affected_customer_scale: float | None = None
     densify_pct: float | None = None
+    demand_pct: float | None = None
     network_variant: str = "base_10km"
     description: str = ""
 
 
 def batch1_scenarios() -> list[Scenario]:
-    """Baseline plus corridor-expansion and severity-reduction dose sweeps."""
+    """Baseline plus two expansion strategies and severity reduction."""
     scenarios = [
         Scenario(
             key="baseline",
@@ -40,6 +41,21 @@ def batch1_scenarios() -> list[Scenario]:
                     "No corridor expansion"
                     if pct == 0
                     else f"Target {pct}% more hypernodes at eligible Interstate sites"
+                ),
+            )
+        )
+        scenarios.append(
+            Scenario(
+                key=f"Demand_p{pct}",
+                family="Demand",
+                dose_pct=float(pct),
+                demand_pct=pct / 100 if pct else None,
+                network_variant="base_10km" if pct == 0 else f"demand_p{pct}",
+                description=(
+                    "No demand-targeted expansion"
+                    if pct == 0
+                    else "Add the same number of nodes as the corridor scenario, "
+                    "prioritizing high-population census tracts"
                 ),
             )
         )

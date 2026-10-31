@@ -15,9 +15,13 @@ ROOT = Path.cwd()
 if not (ROOT / "analysis" / "attack_under_PO").is_dir():
     ROOT = Path(__file__).absolute().parents[3]
 DOSES = (0, 10, 20, 30, 50)
-FAMILIES = ("CF-D", "CF-S")
-LABELS = {"CF-D": "Corridor expansion", "CF-S": "Severity reduction"}
-COLORS = {"CF-D": "#1B4F72", "CF-S": "#B2182B"}
+FAMILIES = ("CF-D", "Demand", "CF-S")
+LABELS = {
+    "CF-D": "AFC-targeted expansion",
+    "Demand": "Demand-targeted expansion",
+    "CF-S": "Severity reduction",
+}
+COLORS = {"CF-D": "#3F345B", "Demand": "#2E8B78", "CF-S": "#B2182B"}
 
 
 def _panel(batch_dir: Path) -> pd.DataFrame:
@@ -31,11 +35,14 @@ def _panel(batch_dir: Path) -> pd.DataFrame:
 
 
 def dose_response(panel: pd.DataFrame) -> pd.DataFrame:
-    baseline = panel[panel["family"] == "baseline"].set_index("unit")["L_tilde_mean"]
+    metric = "L_original_mean"
+    if metric not in panel.columns:
+        raise ValueError(f"Missing primary matched-endpoint metric: {metric}")
+    baseline = panel[panel["family"] == "baseline"].set_index("unit")[metric]
     rows = []
     for row in panel[panel["family"].isin(FAMILIES)].to_dict("records"):
         loss0 = float(baseline[row["unit"]])
-        loss = float(row["L_tilde_mean"])
+        loss = float(row[metric])
         rows.append(
             {
                 "unit": row["unit"],
@@ -89,7 +96,10 @@ def plot(dose: pd.DataFrame, path: Path) -> None:
             label=LABELS[family],
         )
     axis.axhline(0, color="#AAAAAA", linewidth=0.8, linestyle="--")
-    axis.set(xlabel="Intervention intensity (%)", ylabel="Change in node-normalized loss (%)")
+    axis.set(
+        xlabel="Intervention intensity (%)",
+        ylabel="Change in original-node loss (%)",
+    )
     axis.set_xticks(DOSES)
     for side in ("top", "right"):
         axis.spines[side].set_visible(False)
@@ -118,10 +128,12 @@ def main() -> None:
     plot(dose, out / "figure_dose_response.png")
 
     comparison = slopes.pivot(index="unit", columns="family", values="slope_per_percentage_point")
+    n_demand = int((comparison["Demand"] < comparison["CF-D"]).sum())
     n_severity = int((comparison["CF-S"] < comparison["CF-D"]).sum())
     print(
-        f"Saved {out}. Severity reduction has the steeper loss reduction in "
-        f"{n_severity}/{len(comparison)} analytical units."
+        f"Saved {out}. Compared with AFC targeting, demand targeting has a steeper "
+        f"loss reduction in {n_demand}/{len(comparison)} units and severity reduction "
+        f"does so in {n_severity}/{len(comparison)} units."
     )
 
 

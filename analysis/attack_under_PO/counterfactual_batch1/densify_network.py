@@ -37,6 +37,7 @@ from analysis.build_charging_network_step2 import (
 CLUSTER_RADIUS_M = 10_000.0
 CORRIDOR_SPACING_M = 50 * 1609.344
 CACHE_SCHEMA = "fhwa_ev_afc_50mi_10km_unit_boundary_v4"
+DEMAND_CACHE_SCHEMA = "population_tract_matched_count_10km_v1"
 AFC_FILENAME = "ntad_ev_alternative_fuel_corridors_round8_2025.geojson"
 
 
@@ -377,6 +378,154 @@ def load_or_build_densified(
         base_graph_signature=signature,
         boundary_signature=boundary_signature,
     )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("wb") as file:
+        pickle.dump({"network": expanded, "meta": meta}, file)
+    path.with_suffix(".meta.json").write_text(
+        json.dumps(meta, indent=2), encoding="utf-8"
+    )
+    return expanded, meta
+
+
+def _population_signature(pop_units) -> str:
+    """Hash the population candidates used to construct a demand network."""
+    rows = []
+    for _, row in pop_units.sort_values("county_fips").iterrows():
+        point = row.geometry.representative_point()
+        rows.append(
+            f"{str(row['county_fips']).zfill(5)}|{float(row['population']):.6f}|"
+            f"{point.y:.10f}|{point.x:.10f}"
+        )
+    return hashlib.sha256("\n".join(sorted(rows)).encode("utf-8")).hexdigest()
+
+
+def _select_demand_sites(
+    pop_units,
+    existing: np.ndarray,
+    target: int,
+    min_distance_m: float,
+) -> tuple[np.ndarray, int]:
+    """Select high-population tract representatives subject to node spacing."""
+    if target <= 0 or pop_units.empty:
+        return np.empty((0, 2)), 0
+    candidates = []
+    for _, row in pop_units.iterrows():
+        point = row.geometry.representative_point()
+        candidates.append((float(row["population"]), float(point.y), float(point.x)))
+    candidates.sort(key=lambda item: (-item[0], item[1], item[2]))
+
+    selected = []
+    occupied = existing.copy()
+    eligible = 0
+    for _, lat, lon in candidates:
+        point = np.asarray([[lat, lon]], dtype=float)
+        if _minimum_distances(point, existing)[0] < min_distance_m:
+            continue
+        eligible += 1
+        if _minimum_distances(point, occupied)[0] < min_distance_m:
+            continue
+        selected.append(point[0])
+        occupied = np.vstack((occupied, point))
+        if len(selected) == target:
+            break
+    sites = np.asarray(selected) if selected else np.empty((0, 2))
+    return sites, eligible
+
+
+def build_demand_network(
+    graph: nx.Graph,
+    target: int,
+    pop_units,
+    *,
+    cluster_radius_m: float = CLUSTER_RADIUS_M,
+) -> tuple[nx.Graph, dict]:
+    """Add a matched number of nodes near the most populated census tracts."""
+    existing, _ = _node_coords(graph)
+    sites, eligible_count = _select_demand_sites(
+        pop_units, existing, int(target), cluster_radius_m
+    )
+    expanded = graph.copy()
+    for index, (lat, lon) in enumerate(sites):
+        expanded.add_node(
+            f"cf_demand_{index}",
+            lat=float(lat),
+            lon=float(lon),
+            location=(float(lat), float(lon)),
+            n_stations=1,
+            is_cf_added=True,
+            placement_mode="population_demand",
+        )
+    expanded = _rebuild_edges(expanded) if len(sites) else expanded
+    added = len(sites)
+    min_added = None
+    if added > 1:
+        _, _, distances = WGS84_GEOD.inv(
+            np.repeat(sites[:, 1], added),
+            np.repeat(sites[:, 0], added),
+            np.tile(sites[:, 1], added),
+            np.tile(sites[:, 0], added),
+        )
+        distances = np.asarray(distances).reshape(added, added)
+        np.fill_diagonal(distances, np.inf)
+        min_added = float(distances.min())
+    return expanded, {
+        "mode": "population_demand_matched",
+        "n_base": len(existing),
+        "n_target": int(target),
+        "n_added": added,
+        "n_shortfall": int(target) - added,
+        "realized_pct": added / len(existing) if len(existing) else 0.0,
+        "n_candidates": int(len(pop_units)),
+        "n_candidates_eligible": int(eligible_count),
+        "cluster_radius_m": float(cluster_radius_m),
+        "min_distance_to_existing_m": (
+            float(_minimum_distances(sites, existing).min()) if added else None
+        ),
+        "min_distance_between_added_m": min_added,
+        "population_source_signature": _population_signature(pop_units),
+    }
+
+
+def load_or_build_demand(
+    graph: nx.Graph,
+    unit: str,
+    pct: float,
+    target: int,
+    pop_units,
+    cache_root: Path,
+    *,
+    cluster_radius_m: float = CLUSTER_RADIUS_M,
+    force: bool = False,
+) -> tuple[nx.Graph, dict]:
+    """Load or build the population-targeted matched-count comparator."""
+    dose = int(round(100 * pct))
+    path = (
+        cache_root
+        / f"demand_p{dose}"
+        / "network_structures"
+        / f"network_{unit}.pkl"
+    )
+    signature = _graph_signature(graph)
+    pop_signature = _population_signature(pop_units)
+    if path.is_file() and not force:
+        with path.open("rb") as file:
+            payload = pickle.load(file)
+        meta = payload.get("meta", {}) if isinstance(payload, dict) else {}
+        compatible = (
+            meta.get("cache_schema") == DEMAND_CACHE_SCHEMA
+            and meta.get("base_graph_signature") == signature
+            and meta.get("population_source_signature") == pop_signature
+            and int(meta.get("n_target", -1)) == int(target)
+            and meta.get("cluster_radius_m") == float(cluster_radius_m)
+        )
+        if compatible:
+            return payload["network"], meta
+        print(f"[cache-rebuild] incompatible cache: {path}", flush=True)
+
+    expanded, meta = build_demand_network(
+        graph, target, pop_units, cluster_radius_m=cluster_radius_m
+    )
+    meta.update(cache_schema=DEMAND_CACHE_SCHEMA, base_graph_signature=signature)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("wb") as file:
         pickle.dump({"network": expanded, "meta": meta}, file)

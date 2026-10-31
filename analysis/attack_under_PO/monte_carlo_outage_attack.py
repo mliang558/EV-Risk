@@ -156,7 +156,11 @@ def compute_radius_for_state_events(
         how="left",
     )
 
-    df["theta_s"] = df["theta_s"].fillna(1.0).clip(lower=1e-3, upper=1.0)
+    missing_coverage = df["theta_s"].isna()
+    if missing_coverage.any():
+        years = sorted(df.loc[missing_coverage, "year"].astype(int).unique())
+        raise ValueError(f"Missing coverage for {state_name}: years={years}")
+    df["theta_s"] = df["theta_s"].clip(lower=1e-3, upper=1.0)
 
     # Effective impacted customers: min(Nd/theta_s, MCC)
     Nd_eff = (df["Nd"] / df["theta_s"]).clip(lower=0.0)

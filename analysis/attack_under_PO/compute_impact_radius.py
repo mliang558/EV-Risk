@@ -312,7 +312,15 @@ def compute_radius_for_events(project_root: Path) -> pd.DataFrame:
     )
 
     # Clean up
-    events["theta_s"] = events["theta_s"].fillna(1.0)  # if missing, assume full coverage
+    missing_coverage = events["theta_s"].isna()
+    if missing_coverage.any():
+        missing = (
+            events.loc[missing_coverage, ["state", "year"]]
+            .drop_duplicates()
+            .sort_values(["state", "year"])
+            .to_dict("records")
+        )
+        raise ValueError(f"Missing state-year coverage rows: {missing[:10]}")
     events["theta_s"] = events["theta_s"].clip(lower=1e-3, upper=1.0)
 
     # Compute effective impacted customers per formula: min(Nd/theta_s, MCC_c*)

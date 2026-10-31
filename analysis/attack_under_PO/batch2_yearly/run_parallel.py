@@ -29,8 +29,21 @@ for variable in (
 
 import pandas as pd
 
-ROOT = Path(__file__).resolve().parents[3]
-ATTACK = Path(__file__).resolve().parents[1]
+def _project_root() -> Path:
+    """Prefer the checkout being run; do not follow linked code into another clone."""
+    marker = Path("notebooks/PO_data_cleaning/cleaned_outages_2018_2023.csv")
+    candidates = (Path.cwd(), Path(__file__).absolute().parents[3])
+    for candidate in candidates:
+        if (candidate / marker).is_file():
+            return candidate
+    raise FileNotFoundError(
+        "Run this command from the EV-Risk-review checkout containing "
+        f"{marker.as_posix()}"
+    )
+
+
+ROOT = _project_root()
+ATTACK = ROOT / "analysis" / "attack_under_PO"
 for p in (ROOT, ATTACK):
     if str(p) not in sys.path:
         sys.path.insert(0, str(p))
@@ -364,6 +377,7 @@ def main() -> None:
     print(f"  event mode  : {args.event_mode}", flush=True)
     print(f"  simulations : {args.n_sims}", flush=True)
     print(f"  workers     : {workers}", flush=True)
+    print(f"  project     : {ROOT}", flush=True)
     print(f"  networks    : {network_root.resolve()}", flush=True)
     print(f"  output      : {out_root.resolve()}", flush=True)
 
@@ -376,6 +390,7 @@ def main() -> None:
                 "n_sims": args.n_sims,
                 "n_jobs": len(jobs),
                 "event_mode": args.event_mode,
+                "project_root": str(ROOT),
                 "network_root": str(network_root.resolve()),
                 "note": (
                     "Replay: every observed event once; only epicenter varies"

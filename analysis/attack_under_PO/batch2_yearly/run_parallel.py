@@ -90,7 +90,9 @@ def _units_for_year(network_root: Path, year: int, only: set[str] | None) -> lis
                 "unit": unit,
                 "label": display,
                 "member_states": members_abbr_to_full_names(members),
-                "pkl_path": str(pkl.resolve()),
+                # Keep the path anchored to the active checkout.  Path.resolve()
+                # can follow a linked outputs directory into another clone.
+                "pkl_path": str(pkl.absolute()),
                 "n_nodes": int(row.get("n_nodes", 0) or 0),
             }
         )
@@ -173,6 +175,7 @@ def _worker(args: tuple) -> str:
         unit,
         member_states,
         pkl_path,
+        project_root,
         out_root,
         n_sims,
         force,
@@ -181,8 +184,10 @@ def _worker(args: tuple) -> str:
         event_mode,
     ) = args
 
-    root = Path(__file__).resolve().parents[3]
-    attack = Path(__file__).resolve().parents[1]
+    # Worker processes must use the same checkout selected by the parent.
+    # Resolving __file__ can follow linked source files into another clone.
+    root = Path(project_root)
+    attack = root / "analysis" / "attack_under_PO"
     for p in (str(root), str(attack)):
         if p not in sys.path:
             sys.path.insert(0, p)
@@ -378,8 +383,8 @@ def main() -> None:
     print(f"  simulations : {args.n_sims}", flush=True)
     print(f"  workers     : {workers}", flush=True)
     print(f"  project     : {ROOT}", flush=True)
-    print(f"  networks    : {network_root.resolve()}", flush=True)
-    print(f"  output      : {out_root.resolve()}", flush=True)
+    print(f"  networks    : {network_root.absolute()}", flush=True)
+    print(f"  output      : {out_root.absolute()}", flush=True)
 
     write_events = bool(args.write_events)
     (out_root / "batch_manifest.json").write_text(
@@ -391,7 +396,8 @@ def main() -> None:
                 "n_jobs": len(jobs),
                 "event_mode": args.event_mode,
                 "project_root": str(ROOT),
-                "network_root": str(network_root.resolve()),
+                "network_root": str(network_root.absolute()),
+                "network_root_resolved": str(network_root.resolve()),
                 "note": (
                     "Replay: every observed event once; only epicenter varies"
                     if args.event_mode == "replay"
@@ -416,6 +422,7 @@ def main() -> None:
             j["unit"],
             j["member_states"],
             j["pkl_path"],
+            str(ROOT),
             str(out_root),
             args.n_sims,
             args.force,

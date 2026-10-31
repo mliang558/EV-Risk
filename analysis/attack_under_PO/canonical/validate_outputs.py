@@ -15,6 +15,14 @@ def close(a: pd.Series, b: pd.Series, *, atol: float = 1e-10) -> bool:
     return bool(np.allclose(a.to_numpy(float), b.to_numpy(float), atol=atol, rtol=1e-8, equal_nan=True))
 
 
+def certifies_state_sum(manifest: dict) -> bool:
+    """Accept both manifest schemas that encode the same sum-rate method."""
+    return (
+        manifest.get("state_rate_definition") == "Lambda_s = sum_c lambda_c"
+        or manifest.get("state_rate") == "sum of county rates"
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--out", required=True)
@@ -29,7 +37,7 @@ def main() -> None:
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     if manifest.get("scenarios") != ["baseline"]:
         raise ValueError(f"Canonical output must contain baseline only: {manifest.get('scenarios')}")
-    if manifest.get("state_rate_definition") != "Lambda_s = sum_c lambda_c":
+    if not certifies_state_sum(manifest):
         raise ValueError("Manifest does not certify the state sum-rate definition")
 
     unit_dirs = sorted(p.parent for p in out.glob("*/metrics_baseline.csv"))

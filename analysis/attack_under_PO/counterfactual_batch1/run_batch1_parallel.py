@@ -276,6 +276,7 @@ def main() -> None:
         "network_year": args.network_year,
         "outage_model": "pooled 2018-2023 posterior and event pool",
         "state_rate": "sum of county rates",
+        "state_rate_definition": "Lambda_s = sum_c lambda_c",
         "county_assignment": "county rate / state rate",
         "epicenter": args.epicenter_mode,
         "event_count": "Poisson draw from the summed county rates",

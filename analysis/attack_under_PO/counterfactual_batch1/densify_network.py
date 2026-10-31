@@ -3,15 +3,27 @@
 from __future__ import annotations
 
 import hashlib
+from functools import lru_cache
 import json
+import os
 import pickle
 from pathlib import Path
 import sys
 
 import networkx as nx
 import numpy as np
+import pandas as pd
 
-ANALYSIS = Path(__file__).resolve().parents[3] / "analysis"
+def _project_root() -> Path:
+    marker = Path("analysis/attack_under_PO")
+    for candidate in (Path.cwd(), Path(__file__).absolute().parents[3]):
+        if (candidate / marker).is_dir():
+            return candidate
+    raise FileNotFoundError(f"Run from the project checkout containing {marker}")
+
+
+ROOT = _project_root()
+ANALYSIS = ROOT / "analysis"
 if str(ANALYSIS) not in sys.path:
     sys.path.insert(0, str(ANALYSIS))
 
@@ -24,9 +36,8 @@ from analysis.build_charging_network_step2 import (
 
 CLUSTER_RADIUS_M = 10_000.0
 CORRIDOR_SPACING_M = 50 * 1609.344
-CACHE_SCHEMA = "interstate_50mi_10km_unit_boundary_v3"
-ROOT = Path(__file__).resolve().parents[3]
-EV_PROJECT = Path(__file__).resolve().parents[4]
+CACHE_SCHEMA = "fhwa_ev_afc_50mi_10km_unit_boundary_v4"
+AFC_FILENAME = "ntad_ev_alternative_fuel_corridors_round8_2025.geojson"
 
 
 def _node_coords(graph: nx.Graph) -> tuple[np.ndarray, list]:
@@ -62,6 +73,10 @@ def _boundary_signature(boundary) -> str:
     return hashlib.sha256(boundary.wkb).hexdigest()
 
 
+def _file_signature(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
 def _rebuild_edges(graph: nx.Graph) -> nx.Graph:
     """Use the same topology and distance definitions as the canonical network."""
     coords, nodes = _node_coords(graph)
@@ -91,22 +106,55 @@ def _rebuild_edges(graph: nx.Graph) -> nx.Graph:
     return rebuilt
 
 
-def resolve_interstate_shapefile() -> Path:
-    candidates = (
-        EV_PROJECT / "Highway" / "us_interstate_highways.shp" / "us_interstate_highways.shp",
-        EV_PROJECT / "Highway" / "us_interstate_highways.shp",
-        EV_PROJECT / "PrimaryRoads" / "tl_2022_us_primaryroads" / "tl_2022_us_primaryroads.shp",
-        ROOT / "data" / "raw" / "us_interstate_highways.shp",
-    )
-    for path in candidates:
-        if path.is_file():
-            return path
-    tried = "\n  ".join(map(str, candidates))
-    raise FileNotFoundError(f"Interstate shapefile not found. Tried:\n  {tried}")
+def resolve_ev_afc_file() -> Path:
+    """Return the pinned official USDOT/BTS EV Alternative Fuel Corridors file."""
+    configured = os.environ.get("EV_AFC_PATH", "").strip()
+    path = Path(configured) if configured else ROOT / "data" / "raw" / AFC_FILENAME
+    path = path if path.is_absolute() else ROOT / path
+    if not path.is_file():
+        raise FileNotFoundError(
+            f"Official EV AFC file not found: {path}. Run "
+            "download_ev_afc.py before the intervention experiment."
+        )
+    return path
 
 
-def _interstates_near(graph: nx.Graph, boundary=None):
+@lru_cache(maxsize=1)
+def _load_ev_afc(path_text: str):
     import geopandas as gpd
+
+    roads = gpd.read_file(path_text)
+    roads = roads.set_crs(4326) if roads.crs is None else roads.to_crs(4326)
+    columns = {str(column).upper(): column for column in roads.columns}
+    required = {"EV", "ELECTRICVE", "STATE", "AFC_NUMBER"}
+    missing = sorted(required - set(columns))
+    if missing:
+        raise ValueError(f"Official EV AFC file is missing fields: {missing}")
+    roads = roads[
+        pd.to_numeric(roads[columns["EV"]], errors="coerce").fillna(0) > 0
+    ].copy()
+    if roads.empty:
+        raise ValueError(f"No designated EV corridors found in {path_text}")
+    invalid_geometry = ~roads.geometry.geom_type.isin(
+        ["LineString", "MultiLineString"]
+    )
+    if invalid_geometry.any():
+        raise ValueError("Official EV AFC file contains non-line geometry")
+    return roads, columns
+
+
+def validate_ev_afc_file() -> dict:
+    path = resolve_ev_afc_file()
+    roads, columns = _load_ev_afc(str(path.absolute()))
+    return {
+        "path": str(path.absolute()),
+        "sha256": _file_signature(path),
+        "n_segments": int(len(roads)),
+        "statuses": sorted(roads[columns["ELECTRICVE"]].dropna().astype(str).unique()),
+    }
+
+
+def _ev_corridors_near(graph: nx.Graph, boundary=None):
     from shapely.geometry import box
 
     if boundary is None:
@@ -115,20 +163,12 @@ def _interstates_near(graph: nx.Graph, boundary=None):
         lat_max, lon_max = coords.max(axis=0)
         boundary = box(lon_min - 0.35, lat_min - 0.35, lon_max + 0.35, lat_max + 0.35)
 
-    road_path = resolve_interstate_shapefile()
-    roads = gpd.read_file(road_path)
-    roads = roads.set_crs(4326) if roads.crs is None else roads.to_crs(4326)
-    if "RTTYP" in roads.columns:
-        roads = roads[roads["RTTYP"].astype(str).str.upper() == "I"].copy()
-    elif "FULLNAME" in roads.columns:
-        roads = roads[roads["FULLNAME"].astype(str).str.contains(
-            r"I-|Interstate", case=False, na=False
-        )].copy()
-    elif road_path.name.lower() != "us_interstate_highways.shp":
-        raise ValueError(
-            "Road file has neither RTTYP nor FULLNAME; Interstate segments "
-            "cannot be identified safely"
-        )
+    road_path = resolve_ev_afc_file()
+    roads, columns = _load_ev_afc(str(road_path.absolute()))
+    roads = roads.copy()
+    state = roads[columns["STATE"]].fillna("").astype(str)
+    corridor = roads[columns["AFC_NUMBER"]].fillna("").astype(str)
+    roads["_corridor_id"] = state + ":" + corridor
     roads = roads[roads.intersects(boundary)].copy()
     roads["geometry"] = roads.geometry.intersection(boundary)
     return roads[~roads.geometry.is_empty]
@@ -153,26 +193,32 @@ def _corridor_candidates(roads, spacing_m: float) -> np.ndarray:
         "+datum=WGS84 +units=m +no_defs"
     )
     projected = roads.to_crs(projection)
-    line_parts = []
-    for geometry in projected.geometry:
-        if geometry is None or geometry.is_empty:
-            continue
-        if geometry.geom_type == "LineString":
-            line_parts.append(geometry)
-        elif geometry.geom_type in ("MultiLineString", "GeometryCollection"):
-            line_parts.extend(g for g in geometry.geoms if g.geom_type == "LineString")
-    if not line_parts:
-        return np.empty((0, 2))
-    merged = linemerge(unary_union(line_parts))
-    lines = [merged] if merged.geom_type == "LineString" else list(merged.geoms)
     points = []
-    for line in lines:
-        distances = np.arange(0, line.length + 1, spacing_m)
-        points.extend(line.interpolate(min(d, line.length)) for d in distances)
+    for _, group in projected.groupby("_corridor_id", sort=True):
+        parts = []
+        for geometry in group.geometry:
+            if geometry is None or geometry.is_empty:
+                continue
+            if geometry.geom_type == "LineString":
+                parts.append(geometry)
+            elif geometry.geom_type in ("MultiLineString", "GeometryCollection"):
+                parts.extend(g for g in geometry.geoms if g.geom_type == "LineString")
+        if not parts:
+            continue
+        unioned = unary_union(parts)
+        merged = unioned if unioned.geom_type == "LineString" else linemerge(unioned)
+        lines = [merged] if merged.geom_type == "LineString" else list(merged.geoms)
+        for line in lines:
+            if line.length <= spacing_m:
+                distances = [line.length / 2]
+            else:
+                distances = np.arange(spacing_m / 2, line.length, spacing_m)
+            points.extend(line.interpolate(float(distance)) for distance in distances)
     if not points:
         return np.empty((0, 2))
     points = gpd.GeoSeries(points, crs=projection).to_crs(4326)
-    return np.column_stack((points.y, points.x))
+    coordinates = np.column_stack((points.y, points.x))
+    return np.unique(np.round(coordinates, 10), axis=0)
 
 
 def _minimum_distances(candidates: np.ndarray, references: np.ndarray) -> np.ndarray:
@@ -204,7 +250,15 @@ def _select_sites(
     """Take largest-gap candidates while enforcing spacing from every chosen site."""
     initial_distance = _minimum_distances(candidates, existing)
     eligible = np.flatnonzero(initial_distance >= min_distance_m)
-    order = eligible[np.argsort(-initial_distance[eligible])]
+    order = eligible[
+        np.lexsort(
+            (
+                candidates[eligible, 1],
+                candidates[eligible, 0],
+                -initial_distance[eligible],
+            )
+        )
+    ]
     selected = []
     occupied = existing.copy()
     for index in order:
@@ -229,7 +283,7 @@ def build_corridor_network(
 ) -> tuple[nx.Graph, dict]:
     existing, _ = _node_coords(graph)
     target = int(np.ceil(pct * len(existing))) if pct > 0 else 0
-    candidates = _corridor_candidates(_interstates_near(graph, boundary), spacing_m)
+    candidates = _corridor_candidates(_ev_corridors_near(graph, boundary), spacing_m)
     sites, eligible_count = _select_sites(
         candidates, existing, target, cluster_radius_m
     )
@@ -247,7 +301,7 @@ def build_corridor_network(
     expanded = _rebuild_edges(expanded) if len(sites) else expanded
     added = len(sites)
     return expanded, {
-        "mode": "nevi",
+        "mode": "fhwa_ev_afc",
         "pct": float(pct),
         "n_base": len(existing),
         "n_target": target,
@@ -259,6 +313,8 @@ def build_corridor_network(
         "n_candidates_eligible": eligible_count,
         "spacing_m": float(spacing_m),
         "cluster_radius_m": float(cluster_radius_m),
+        "corridor_source": str(resolve_ev_afc_file().absolute()),
+        "corridor_source_sha256": _file_signature(resolve_ev_afc_file()),
     }
 
 
@@ -281,6 +337,7 @@ def load_or_build_densified(
     path = _cache_path(cache_root, pct, unit)
     signature = _graph_signature(graph)
     boundary_signature = _boundary_signature(boundary)
+    corridor_signature = _file_signature(resolve_ev_afc_file())
     if path.is_file() and not force:
         with path.open("rb") as file:
             payload = pickle.load(file)
@@ -290,6 +347,7 @@ def load_or_build_densified(
             and meta.get("base_graph_signature") == signature
             and meta.get("boundary_signature") == boundary_signature
             and meta.get("cluster_radius_m") == float(cluster_radius_m)
+            and meta.get("corridor_source_sha256") == corridor_signature
         )
         if compatible:
             return payload["network"], meta

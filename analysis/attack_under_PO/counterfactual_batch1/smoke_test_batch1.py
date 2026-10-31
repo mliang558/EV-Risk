@@ -11,7 +11,9 @@ import sys
 import numpy as np
 import pandas as pd
 
-ROOT = Path(__file__).resolve().parents[3]
+ROOT = Path.cwd()
+if not (ROOT / "analysis" / "attack_under_PO").is_dir():
+    ROOT = Path(__file__).absolute().parents[3]
 DOSES = (0, 10, 20, 30, 50)
 
 

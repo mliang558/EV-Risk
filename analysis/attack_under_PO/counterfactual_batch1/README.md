@@ -4,9 +4,11 @@ This package compares two one-at-a-time interventions on the validated 2023
 network. Every Monte Carlo replication uses the same pooled 2018–2023 outage
 draw across the baseline and all intervention doses.
 
-- **Corridor expansion (`CF-D`)** adds eligible Interstate-corridor hypernodes
-  at target doses of 10%, 20%, 30%, and 50%. Candidates are sampled every 50
-  miles and must remain at least 10 km from existing and newly added nodes.
+- **Corridor expansion (`CF-D`)** adds hypernodes along FHWA-designated EV
+  Alternative Fuel Corridors at target doses of 10%, 20%, 30%, and 50%.
+  Contiguous corridor segments are merged by state and corridor ID, candidate
+  points are sampled every 50 miles, and selected sites must remain at least
+  10 km from existing and newly added nodes.
   The complete Voronoi network is rebuilt after placement. Corridor shortfalls
   are reported and are never filled with off-corridor sites.
 - **Severity reduction (`CF-S`)** reduces affected customers by the same doses,
@@ -16,6 +18,8 @@ draw across the baseline and all intervention doses.
 Run the input check, a two-simulation smoke test, and then the full experiment:
 
 ```bash
+python -u analysis/attack_under_PO/counterfactual_batch1/download_ev_afc.py
+
 python -u analysis/attack_under_PO/counterfactual_batch1/run_batch1_parallel.py --check-only
 
 python -u analysis/attack_under_PO/counterfactual_batch1/run_batch1_parallel.py \

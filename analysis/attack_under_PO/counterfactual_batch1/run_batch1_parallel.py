@@ -20,9 +20,17 @@ import networkx as nx
 import numpy as np
 import pandas as pd
 
-ROOT = Path(__file__).resolve().parents[3]
+def _project_root() -> Path:
+    marker = Path("analysis/attack_under_PO")
+    for candidate in (Path.cwd(), Path(__file__).absolute().parents[3]):
+        if (candidate / marker).is_dir():
+            return candidate
+    raise FileNotFoundError(f"Run from the project checkout containing {marker}")
+
+
+ROOT = _project_root()
 ANALYSIS = ROOT / "analysis"
-ATTACK = Path(__file__).resolve().parents[1]
+ATTACK = ROOT / "analysis" / "attack_under_PO"
 for path in (ROOT, ANALYSIS, ATTACK):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
@@ -71,15 +79,15 @@ def _network_jobs(network_root: Path, year: int, selected: set[str]) -> list[dic
                 "unit": unit,
                 "label": label,
                 "member_states": _member_names(str(row.get("members", unit))),
-                "pkl_path": graph_path.resolve(),
+                "pkl_path": graph_path.absolute(),
                 "n_nodes": int(row["n_nodes"]) if pd.notna(row.get("n_nodes")) else 0,
             }
         )
     return sorted(jobs, key=lambda job: (-job["n_nodes"], job["unit"]))
 
 
-def _preflight(jobs: list[dict], deep: bool) -> None:
-    from counterfactual_batch1.densify_network import resolve_interstate_shapefile
+def _preflight(jobs: list[dict], deep: bool) -> dict:
+    from counterfactual_batch1.densify_network import validate_ev_afc_file
     from monte_carlo_outage_attack import load_network
 
     required = {
@@ -99,7 +107,11 @@ def _preflight(jobs: list[dict], deep: bool) -> None:
     if missing:
         raise FileNotFoundError("Missing inputs:\n  " + "\n  ".join(missing))
 
-    resolve_interstate_shapefile()
+    afc = validate_ev_afc_file()
+    print(
+        f"OK: official EV AFC corridors: {afc['n_segments']} segments, "
+        f"statuses={afc['statuses']}\n    {afc['path']}"
+    )
     errors = []
     for job in jobs:
         graph = load_network(job["pkl_path"])
@@ -111,7 +123,7 @@ def _preflight(jobs: list[dict], deep: bool) -> None:
         raise ValueError("Invalid networks:\n  " + "\n  ".join(errors))
 
     if not deep:
-        return
+        return afc
     from compute_impact_radius import (
         STATE_NAME_TO_ABBR,
         load_county_geometry_and_mcc,
@@ -189,6 +201,7 @@ def _preflight(jobs: list[dict], deep: bool) -> None:
         f"{posterior.shape[1]} counties, {len(outages)} events, and "
         f"{population_fallbacks} county-polygon epicenter fallbacks"
     )
+    return afc
 
 
 def _run_job(task: dict) -> str:
@@ -252,7 +265,7 @@ def main() -> None:
     expected = len(selected) if selected else 45
     if not jobs or (not selected and len(jobs) != expected):
         raise ValueError(f"Expected {expected} analytical units, found {len(jobs)}")
-    _preflight(jobs, deep=args.check_only)
+    afc = _preflight(jobs, deep=args.check_only)
     if args.check_only:
         return
 
@@ -285,7 +298,11 @@ def main() -> None:
         ),
         "event_reset": "restore the original scenario network after every event",
         "global_efficiency": "unweighted, with the original-node denominator fixed after removal",
-        "corridor_intervention": "50-mile Interstate candidates, at least 10 km apart",
+        "corridor_intervention": (
+            "FHWA-designated EV Alternative Fuel Corridor candidates sampled every "
+            "50 miles and kept at least 10 km from all existing and added hypernodes"
+        ),
+        "corridor_source": afc,
         "severity_intervention": "reduce affected customers, then recompute capped radius",
         "scenarios": [scenario.key for scenario in scenarios],
         "n_sims": args.n_sims,

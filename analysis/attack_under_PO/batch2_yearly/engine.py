@@ -18,7 +18,6 @@ from counterfactual_batch1.crn_engine import (
     aggregate_sim_metrics,
 )
 from counterfactual_batch1.scenarios import Scenario
-from counterfactual_batch1.urban_counties import urban_fips_from_mcc
 from monte_carlo_outage_attack import (
     compute_radius_for_state_events,
     load_county_geometry_and_mcc,
@@ -391,7 +390,6 @@ def run_unit_batch2(
     cov_df = load_coverage_history(project_root)
     county_polys = load_county_polygons(project_root)
     poly_dict = {row["fips_str"]: row["geometry"] for _, row in county_polys.iterrows()}
-    urban_fips = urban_fips_from_mcc(county_geom_mcc, top_frac=0.25)
     pop_gdf = require_pop_units(project_root)
     git = _git_commit(project_root)
 
@@ -480,7 +478,6 @@ def run_unit_batch2(
             G=G,
             E0=E0,
             scenario=scenario,
-            urban_fips=urban_fips,
         )
         sig = inspect.signature(evaluate_events_on_graph)
         if "removal_cache" in sig.parameters:

@@ -108,9 +108,18 @@ def _add_radii_and_epicenters(
         )
     out = pd.concat(chunks, ignore_index=True)
 
-    if out["impact_radius_km"].isna().any():
-        bad = out.loc[out["impact_radius_km"].isna(), "fips_str"].unique()
-        raise ValueError(f"Missing impact radius for counties={bad[:10]}")
+    radius_fields = ["Nd", "MCC", "rho", "theta_s", "impact_radius_km"]
+    invalid_radius = (
+        ~np.isfinite(out[radius_fields].astype(float)).all(axis=1)
+        | (out["Nd"].astype(float) < 0)
+        | (out["MCC"].astype(float) <= 0)
+        | (out["rho"].astype(float) <= 0)
+        | ~out["theta_s"].astype(float).between(0, 1, inclusive="both")
+        | (out["impact_radius_km"].astype(float) < 0)
+    )
+    if invalid_radius.any():
+        bad = sorted(out.loc[invalid_radius, "fips_str"].astype(str).unique())
+        raise ValueError(f"Invalid replay radius inputs for counties={bad[:10]}")
 
     rng = np.random.default_rng(seed)
     epicenters: list[tuple[float, float] | None] = []
@@ -361,10 +370,9 @@ def run_unit_batch2(
 
     G = load_network(pkl_path)
     n_nodes = int(G.number_of_nodes())
-    try:
-        E0 = float(nx.global_efficiency(G))
-    except Exception:
-        E0 = 0.0
+    E0 = float(nx.global_efficiency(G))
+    if not np.isfinite(E0) or E0 <= 0:
+        raise ValueError(f"Invalid baseline efficiency for {unit}: {E0}")
     graph_id = f"net{year_network}:{unit}"
 
     event_mode = str(event_mode).strip().lower()

@@ -300,6 +300,20 @@ def build_corridor_network(
         )
     expanded = _rebuild_edges(expanded) if len(sites) else expanded
     added = len(sites)
+    min_existing = (
+        float(_minimum_distances(sites, existing).min()) if added else None
+    )
+    min_added = None
+    if added > 1:
+        _, _, distances = WGS84_GEOD.inv(
+            np.repeat(sites[:, 1], added),
+            np.repeat(sites[:, 0], added),
+            np.tile(sites[:, 1], added),
+            np.tile(sites[:, 0], added),
+        )
+        distances = np.asarray(distances).reshape(added, added)
+        np.fill_diagonal(distances, np.inf)
+        min_added = float(distances.min())
     return expanded, {
         "mode": "fhwa_ev_afc",
         "pct": float(pct),
@@ -313,6 +327,8 @@ def build_corridor_network(
         "n_candidates_eligible": eligible_count,
         "spacing_m": float(spacing_m),
         "cluster_radius_m": float(cluster_radius_m),
+        "min_distance_to_existing_m": min_existing,
+        "min_distance_between_added_m": min_added,
         "corridor_source": str(resolve_ev_afc_file().absolute()),
         "corridor_source_sha256": _file_signature(resolve_ev_afc_file()),
     }

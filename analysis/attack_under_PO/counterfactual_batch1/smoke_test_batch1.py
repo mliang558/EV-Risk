@@ -105,6 +105,26 @@ def _check_corridor_metadata(unit_dir: Path, checks: Checks) -> None:
             0 <= added <= target and int(meta["n_shortfall"]) == target - added,
             f"{key}: additions and corridor shortfall are internally consistent",
         )
+        checks.check(
+            meta.get("mode") == "fhwa_ev_afc"
+            and np.isclose(float(meta.get("spacing_m", 0)), 50 * 1609.344)
+            and np.isclose(float(meta.get("cluster_radius_m", 0)), 10_000),
+            f"{key}: official EV AFC placement rules are recorded",
+        )
+        checks.check(
+            int(meta.get("n_candidates", 0))
+            >= int(meta.get("n_candidates_eligible", 0))
+            >= added,
+            f"{key}: corridor candidate counts are valid",
+        )
+        distances = [
+            meta.get("min_distance_to_existing_m"),
+            meta.get("min_distance_between_added_m"),
+        ]
+        checks.check(
+            all(value is None or float(value) >= 10_000 - 1e-6 for value in distances),
+            f"{key}: added sites respect the 10 km separation rule",
+        )
 
 
 def main() -> None:

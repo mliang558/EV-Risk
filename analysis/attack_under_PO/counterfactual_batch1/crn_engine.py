@@ -702,6 +702,14 @@ def run_unit_batch1(
                     "n_base",
                     "n_shortfall",
                     "realized_pct",
+                    "n_candidates",
+                    "n_candidates_eligible",
+                    "spacing_m",
+                    "cluster_radius_m",
+                    "min_distance_to_existing_m",
+                    "min_distance_between_added_m",
+                    "corridor_source",
+                    "corridor_source_sha256",
                 )
                 if k in meta or k in ("n_nevi", "n_target", "n_added", "n_shortfall")
             }

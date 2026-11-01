@@ -28,13 +28,13 @@ python -u analysis/attack_under_PO/counterfactual_batch1/run_batch1_parallel.py 
 
 python -u analysis/attack_under_PO/counterfactual_batch1/run_batch1_parallel.py \
   --only VT --n-sims 2 --workers 1 \
-  --out results_interventions_1029_smoke_VT
+  --out results_interventions_1031_smoke_VT
 
 python -u analysis/attack_under_PO/counterfactual_batch1/smoke_test_batch1.py \
-  --batch-dir results_interventions_1029_smoke_VT --unit VT
+  --batch-dir results_interventions_1031_smoke_VT --unit VT
 
 nohup python -u analysis/attack_under_PO/counterfactual_batch1/run_batch1_parallel.py \
-  --out results_interventions_1029_network2023_pooled2018_2023_n100 \
+  --out results_interventions_1031_network2023_pooled2018_2023_n100 \
   --n-sims 100 --workers 45 --no-events \
   > results_review/logs/interventions_1029.log 2>&1 &
 ```
@@ -43,7 +43,7 @@ Analyze the completed run with:
 
 ```bash
 python analysis/attack_under_PO/counterfactual_batch1/analyze_dose_response.py \
-  --batch-dir results_interventions_1029_network2023_pooled2018_2023_n100
+  --batch-dir results_interventions_1031_network2023_pooled2018_2023_n100
 ```
 
 The primary comparison measures unweighted global efficiency only among the

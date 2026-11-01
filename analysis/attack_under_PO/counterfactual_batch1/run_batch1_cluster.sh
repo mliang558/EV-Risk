@@ -17,16 +17,15 @@ export MKL_NUM_THREADS="${MKL_NUM_THREADS:-1}"
 export OPENBLAS_NUM_THREADS="${OPENBLAS_NUM_THREADS:-1}"
 export NUMEXPR_NUM_THREADS="${NUMEXPR_NUM_THREADS:-1}"
 
-NETWORK_ROOT="${NETWORK_ROOT:-outputs/network_graph_10km_2018_2026}"
+NETWORK_ROOT="${NETWORK_ROOT:-outputs/1029-network-data-preprocessing-10km-geodesic-2018-2023}"
 # Prefer absolute OUT so wipe path and run path never diverge
-OUT="${OUT:-$ROOT/results_cf_batch1_2023_pooled}"
-DENSIFY_CACHE="${DENSIFY_CACHE:-outputs/network_graph_cf_densify_2023}"
+OUT="${OUT:-$ROOT/results_interventions_1031_network2023_pooled2018_2023}"
+DENSIFY_CACHE="${DENSIFY_CACHE:-outputs/1031-network-expansion-comparators-2023}"
 N_SIMS="${N_SIMS:-100}"
 # Prefer all visible CPUs; runner caps at n_units
 NPROC_ALL="$(nproc --all 2>/dev/null || nproc 2>/dev/null || echo 8)"
 WORKERS="${WORKERS:-$NPROC_ALL}"
-# Review set: one mitigation experiment plus one severity comparator.
-# Placement controls are opt-in with FAMILIES=baseline,CF-D,CF-D-pop,CF-D-null,CF-S.
+# Baseline, two matched expansion strategies, and severity reduction.
 FAMILIES="${FAMILIES:-baseline,CF-D,Demand,CF-S}"
 ONLY="${ONLY:-}"
 EPICENTER_MODE="${EPICENTER_MODE:-population}"

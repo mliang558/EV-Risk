@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the 2023 corridor-expansion and severity-reduction experiments."""
+"""Run the 2023 corridor, demand-targeted, and severity interventions."""
 
 from __future__ import annotations
 
@@ -39,8 +39,8 @@ from counterfactual_batch1.scenarios import batch1_scenarios  # noqa: E402
 from region_merge_config import ABBR_TO_STATE_NAME  # noqa: E402
 
 NETWORK_ROOT = ROOT / "outputs" / "1029-network-data-preprocessing-10km-geodesic-2018-2023"
-CACHE_ROOT = ROOT / "outputs" / "1029-network-nevi-expansion-2023"
-OUTPUT_ROOT = ROOT / "results_interventions_1029_network2023_pooled2018_2023"
+CACHE_ROOT = ROOT / "outputs" / "1031-network-expansion-comparators-2023"
+OUTPUT_ROOT = ROOT / "results_interventions_1031_network2023_pooled2018_2023"
 
 
 def _absolute(path: Path) -> Path:

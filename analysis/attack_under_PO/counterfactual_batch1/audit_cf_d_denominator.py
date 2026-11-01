@@ -5,6 +5,7 @@ Does NOT conclude policy — only separates mechanical |V| scaling from residual
 """
 from __future__ import annotations
 
+import argparse
 import csv
 import json
 import math
@@ -12,8 +13,25 @@ import statistics as stats
 from collections import defaultdict
 from pathlib import Path
 
-ROOT = Path("artifacts/cf_batch1_2023_pooled")
-OUT = ROOT / "analysis_denominator_audit"
+parser = argparse.ArgumentParser(
+    description="Separate scenario-node normalization from total outage loss."
+)
+parser.add_argument(
+    "--batch-dir",
+    type=Path,
+    default=Path("artifacts/cf_batch1_2023_pooled"),
+    help="Directory containing panel_scenario_summary.csv and optional units/ metadata.",
+)
+parser.add_argument(
+    "--out-dir",
+    type=Path,
+    default=None,
+    help="Output directory (default: <batch-dir>/analysis_denominator_audit).",
+)
+args = parser.parse_args()
+
+ROOT = args.batch_dir.resolve()
+OUT = (args.out_dir or ROOT / "analysis_denominator_audit").resolve()
 OUT.mkdir(parents=True, exist_ok=True)
 
 
@@ -317,4 +335,3 @@ print(f"\nWrote under {OUT}")
 print(
     "NOTE: P(hit)/E[loss|hit] split and slope CIs need metrics_*.csv from cluster."
 )
-print("NOTE: CF-D-pop / CF-D-null were NOT in this run — cannot compare placement rules yet.")

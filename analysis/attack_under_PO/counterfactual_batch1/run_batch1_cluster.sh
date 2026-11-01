@@ -17,17 +17,16 @@ export MKL_NUM_THREADS="${MKL_NUM_THREADS:-1}"
 export OPENBLAS_NUM_THREADS="${OPENBLAS_NUM_THREADS:-1}"
 export NUMEXPR_NUM_THREADS="${NUMEXPR_NUM_THREADS:-1}"
 
-NETWORK_ROOT="${NETWORK_ROOT:-outputs/network_graph_10km_2018_2026}"
+NETWORK_ROOT="${NETWORK_ROOT:-outputs/1029-network-data-preprocessing-10km-geodesic-2018-2023}"
 # Prefer absolute OUT so wipe path and run path never diverge
-OUT="${OUT:-$ROOT/results_cf_batch1_2023_pooled}"
-DENSIFY_CACHE="${DENSIFY_CACHE:-outputs/network_graph_cf_densify_2023}"
-K5KM_ROOT="${K5KM_ROOT:-outputs/network_graph_5km_2018_2026}"
+OUT="${OUT:-$ROOT/results_interventions_1031_network2023_pooled2018_2023}"
+DENSIFY_CACHE="${DENSIFY_CACHE:-outputs/1031-network-expansion-comparators-2023}"
 N_SIMS="${N_SIMS:-100}"
 # Prefer all visible CPUs; runner caps at n_units
 NPROC_ALL="$(nproc --all 2>/dev/null || nproc 2>/dev/null || echo 8)"
 WORKERS="${WORKERS:-$NPROC_ALL}"
-# Include K (shares CRN with other families; 5 km nets built once if missing)
-FAMILIES="${FAMILIES:-baseline,CF-D,CF-S,U,K}"
+# Baseline, two matched expansion strategies, and severity reduction.
+FAMILIES="${FAMILIES:-baseline,CF-D,Demand,CF-S}"
 ONLY="${ONLY:-}"
 EPICENTER_MODE="${EPICENTER_MODE:-population}"
 # Full panel: skip per-event gz (huge I/O). Safe for §4.3:
@@ -48,18 +47,8 @@ echo "[CF-B1] ROOT=$ROOT"
 echo "[CF-B1] OUT=$OUT N_SIMS=$N_SIMS WORKERS=$WORKERS FAMILIES=$FAMILIES EPICENTER=$EPICENTER_MODE NO_EVENTS=$NO_EVENTS"
 echo "[CF-B1] threads OMP=$OMP_NUM_THREADS MKL=$MKL_NUM_THREADS OPENBLAS=$OPENBLAS_NUM_THREADS"
 
-# Optional: build 5 km nets if K is requested
-if [[ "$FAMILIES" == *K* ]]; then
-  if [[ ! -f "${K5KM_ROOT}/2023/network_summary.csv" ]]; then
-    echo "[CF-B1] building 5 km networks for scenario K..."
-    python analysis/attack_under_PO/counterfactual_batch1/build_5km_networks_2023.py \
-      --out "$K5KM_ROOT"
-  fi
-fi
-
 ARGS=(
   --network-root "$NETWORK_ROOT"
-  --k5km-root "$K5KM_ROOT"
   --densify-cache "$DENSIFY_CACHE"
   --out "$OUT"
   --n-sims "$N_SIMS"

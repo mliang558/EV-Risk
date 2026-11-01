@@ -1,0 +1,13 @@
+*.py text eol=lf
+*.sh text eol=lf
+*.md text eol=lf
+*.txt text eol=lf
+*.csv text eol=lf
+*.json text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+# Preserve this legacy CRLF file until it is intentionally normalized.
+analysis/attack_under_PO/counterfactual_batch1/crn_engine.py -text whitespace=cr-at-eol
+analysis/attack_under_PO/counterfactual_batch1/build_cf_d_networks.py -text whitespace=cr-at-eol
+analysis/attack_under_PO/counterfactual_batch1/densify_network.py -text whitespace=cr-at-eol
+analysis/attack_under_PO/counterfactual_batch1/scenarios.py -text whitespace=cr-at-eol

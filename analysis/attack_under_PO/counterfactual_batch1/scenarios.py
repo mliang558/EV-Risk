@@ -1,214 +1,71 @@
-#!/usr/bin/env python3
-"""
-Batch-1 counterfactual scenarios (2023 network × pooled outages).
-
-Design: one-at-a-time (OAT) dose sweep with common random numbers.
-  - Network, outage draws, and seeds fixed across scenarios within a sim.
-  - Only one intervention factor changes at a time.
-  - Shared dose grid for CF-D and CF-S: 0 (baseline), 10, 20, 30, 50%.
-
-CF-D placement rules (coverage expansion, not within-cluster densify):
-  CF-D      = NEVI corridor (main) — every 50 mi on interstate, >10 km from existing
-  CF-D-pop  = population-weighted in unit counties
-  CF-D-null = uniform spatial null, 10 seed replicates
-
-Does NOT touch the original Monte Carlo pipeline.
-"""
+"""Intervention scenarios for the 2023 canonical network."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-import numpy as np
-
-# Keep local to avoid importing densify_network (heavy) just to list scenarios.
-NULL_REPLICATES = 10
-
-# Shared intensity grid for dose-response (percent).
-# Dose 0 = no intervention (CF-D adds 0 nodes; CF-S radius_scale=1); must match baseline L under CRN.
-DOSE_PCTS: tuple[int, ...] = (0, 10, 20, 30, 50)
+DOSE_PCTS = (0, 10, 20, 30, 50)
 
 
 @dataclass(frozen=True)
 class Scenario:
-    """One counterfactual / robustness setting."""
-
     key: str
-    family: str  # baseline | CF-D | CF-D-pop | CF-D-null | CF-S | CF-T | U | K | CF-D-within
-    radius_scale: float = 1.0
-    duration_scale: float = 1.0
-    urban_radius_scale: float | None = None  # if set, only urban counties use this
-    densify_pct: float | None = None  # fraction of |V| new hypernodes
-    densify_mode: str | None = None  # "nevi" | "pop" | "uniform" | "within"
-    densify_seed: int = 42
-    densify_replicate: int | None = None  # null control only
-    network_variant: str = "base_10km"  # base_10km | densify_* | k5km
-    # Dose for OAT curves: 0 = baseline; else % intensity
+    family: str
     dose_pct: float = 0.0
+    affected_customer_scale: float | None = None
+    densify_pct: float | None = None
+    demand_pct: float | None = None
+    network_variant: str = "base_10km"
     description: str = ""
 
 
 def batch1_scenarios() -> list[Scenario]:
-    """
-    Batch 1 matrix (2023 × pooled), sharing one CRN event draw per sim.
-
-    Primary OAT pair: CF-D (NEVI corridor coverage expansion) vs CF-S.
-    CF-D-pop / CF-D-null are robustness / null controls on the same dose grid.
-    Within-cluster densification is beyond model resolution (optional CF-D-within).
-    """
-    out: list[Scenario] = [
+    """Baseline plus two expansion strategies and severity reduction."""
+    scenarios = [
         Scenario(
             key="baseline",
             family="baseline",
-            network_variant="base_10km",
-            dose_pct=0.0,
-            description="OAT reference: 2023 net, pooled outages, no intervention",
-        ),
+            description="2023 network with pooled 2018-2023 outages",
+        )
     ]
+
     for pct in DOSE_PCTS:
-        frac = pct / 100.0
-        # --- main: NEVI corridor ---
-        # pct=0 → densify no-op (CRN smoke: L must equal baseline)
-        net_var = "base_10km" if pct == 0 else f"densify_nevi_p{pct}"
-        out.append(
+        scenarios.append(
             Scenario(
                 key=f"CF-D_nevi_p{pct}",
                 family="CF-D",
-                densify_pct=frac if pct > 0 else None,
-                densify_mode="nevi" if pct > 0 else None,
-                network_variant=net_var,
                 dose_pct=float(pct),
+                densify_pct=pct / 100 if pct else None,
+                network_variant="base_10km" if pct == 0 else f"nevi_p{pct}",
                 description=(
-                    f"NEVI corridor coverage: +{pct}% hypernodes every 50 mi on "
-                    f"interstate, excluding sites <10 km from existing (main CF-D)"
-                    if pct > 0
-                    else "CF-D dose 0 (no nodes added; CRN lock vs baseline)"
+                    "No corridor expansion"
+                    if pct == 0
+                    else f"Target {pct}% more hypernodes at eligible Interstate sites"
                 ),
             )
         )
-        # --- demand-oriented / null / within: skip dose 0 (same as baseline) ---
-        if pct == 0:
-            continue
-        out.append(
+        scenarios.append(
             Scenario(
-                key=f"CF-D_pop_p{pct}",
-                family="CF-D-pop",
-                densify_pct=frac,
-                densify_mode="pop",
-                network_variant=f"densify_pop_p{pct}",
+                key=f"Demand_p{pct}",
+                family="Demand",
                 dose_pct=float(pct),
+                demand_pct=pct / 100 if pct else None,
+                network_variant="base_10km" if pct == 0 else f"demand_p{pct}",
                 description=(
-                    f"Population-weighted coverage: +{pct}% hypernodes in unit "
-                    f"counties, >10 km from existing"
+                    "No demand-targeted expansion"
+                    if pct == 0
+                    else "Add the same number of nodes as the corridor scenario, "
+                    "prioritizing high-population census tracts"
                 ),
             )
         )
-        # --- spatial null (10 replicates) ---
-        for r in range(NULL_REPLICATES):
-            out.append(
-                Scenario(
-                    key=f"CF-D_null_p{pct}_r{r}",
-                    family="CF-D-null",
-                    densify_pct=frac,
-                    densify_mode="uniform",
-                    densify_seed=42,
-                    densify_replicate=r,
-                    network_variant=f"densify_uniform_p{pct}_r{r}",
-                    dose_pct=float(pct),
-                    description=(
-                        f"Uniform spatial null: +{pct}% hypernodes, replicate {r}/"
-                        f"{NULL_REPLICATES - 1}"
-                    ),
-                )
-            )
-        # optional diagnostic
-        out.append(
-            Scenario(
-                key=f"CF-D_within_p{pct}",
-                family="CF-D-within",
-                densify_pct=frac,
-                densify_mode="within",
-                network_variant=f"densify_within_p{pct}",
-                dose_pct=float(pct),
-                description=(
-                    f"Diagnostic: within-cluster add (beyond 10 km resolution; "
-                    f"topology fixed → ΔL≈0 by construction)"
-                ),
-            )
-        )
-    for pct in DOSE_PCTS:
-        # CF-S: reduce affected customers by pct% ⇒ area ∝ N ⇒ R_c *= sqrt(1 - pct/100)
-        frac_cut = pct / 100.0
-        radius_scale = float(np.sqrt(max(0.0, 1.0 - frac_cut)))
-        out.append(
+        scenarios.append(
             Scenario(
                 key=f"CF-S_m{pct}",
                 family="CF-S",
-                radius_scale=radius_scale,
                 dose_pct=float(pct),
-                description=(
-                    f"OAT severity: N_affected −{pct}% "
-                    f"(R_c × √(1−{pct}/100) = ×{radius_scale:.4f})"
-                ),
+                affected_customer_scale=1 - pct / 100,
+                description=f"Reduce affected customers by {pct}%",
             )
         )
-        scale_t = 1.0 - pct / 100.0
-        out.append(
-            Scenario(
-                key=f"CF-T_m{pct}",
-                family="CF-T",
-                duration_scale=scale_t,
-                dose_pct=float(pct),
-                description=f"OAT duration: T_i −{pct}%",
-            )
-        )
-    for mult, tag in ((1.5, "1p5"), (2.0, "2")):
-        out.append(
-            Scenario(
-                key=f"U_x{tag}",
-                family="U",
-                urban_radius_scale=mult,
-                dose_pct=float("nan"),
-                description=f"Urban counties: R_c × {mult} (not on CF-D/CF-S dose grid)",
-            )
-        )
-    out.append(
-        Scenario(
-            key="K_5km",
-            family="K",
-            network_variant="k5km",
-            dose_pct=float("nan"),
-            description="5 km clustering network (not on CF-D/CF-S dose grid)",
-        )
-    )
-    return out
-
-
-def filter_scenarios(
-    scenarios: list[Scenario],
-    families: set[str] | None,
-    keys: set[str] | None = None,
-) -> list[Scenario]:
-    out = scenarios
-    if families:
-        fam = set(families)
-        # Do NOT auto-include CF-D-within / CF-D-pop / CF-D-null with CF-D.
-        out = [s for s in out if s.family in fam or s.key == "baseline"]
-        if not any(s.key == "baseline" for s in out):
-            out = [scenarios[0]] + out
-    if keys:
-        keep = keys | {"baseline"}
-        out = [s for s in out if s.key in keep]
-    seen: set[str] = set()
-    uniq: list[Scenario] = []
-    for s in out:
-        if s.key in seen:
-            continue
-        seen.add(s.key)
-        uniq.append(s)
-    return uniq
-
-
-def dose_grid_families() -> tuple[str, ...]:
-    """Families that share DOSE_PCTS for dose-response plots."""
-    return ("CF-D", "CF-D-pop", "CF-D-null", "CF-D-within", "CF-S", "CF-T")
+    return scenarios

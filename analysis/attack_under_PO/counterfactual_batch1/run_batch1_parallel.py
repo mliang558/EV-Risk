@@ -1,343 +1,371 @@
 #!/usr/bin/env python3
-"""
-Parallel launcher for Counterfactual Batch 1 (2023 × pooled outages).
-
-Does NOT write into results_mc_10km_panel_2018_2026/.
-Default out: results_cf_batch1_2023_pooled/
-
-Usage (cluster):
-  export PYTHONPATH="$ROOT/analysis:$ROOT/analysis/attack_under_PO"
-  python analysis/attack_under_PO/counterfactual_batch1/run_batch1_parallel.py \\
-      --n-sims 100 --workers 12 --families baseline,CF-D,CF-S,U,K
-
-Priority families: baseline,CF-D (NEVI),CF-S (N_affected),U,K
-# Requires: data/processed/pop_units_epicenter.gpkg (census-tract epicenters)
-# Optional: CF-D-pop, CF-D-null; EPICENTER_MODE=station only for appendix ablation
-# Base nets: reuse outputs/network_graph_10km_2018_2026/2023 (do not rebuild).
-# Epicenters: census-tract population only (never station-KDE).
-Optional later: CF-T,U,K
-"""
+"""Run the 2023 corridor, demand-targeted, and severity interventions."""
 
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from datetime import datetime, timezone
 import json
 import os
+from pathlib import Path
+import subprocess
 import sys
 import time
-from concurrent.futures import ProcessPoolExecutor, as_completed
-from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[3]
-ATTACK = Path(__file__).resolve().parents[1]
-PKG = Path(__file__).resolve().parent
-for p in (ROOT, ATTACK, PKG.parent):
-    if str(p) not in sys.path:
-        sys.path.insert(0, str(p))
+for variable in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
+    os.environ.setdefault(variable, "1")
 
+import networkx as nx
+import numpy as np
+import pandas as pd
+
+def _project_root() -> Path:
+    marker = Path("analysis/attack_under_PO")
+    for candidate in (Path.cwd(), Path(__file__).absolute().parents[3]):
+        if (candidate / marker).is_dir():
+            return candidate
+    raise FileNotFoundError(f"Run from the project checkout containing {marker}")
+
+
+ROOT = _project_root()
+ANALYSIS = ROOT / "analysis"
+ATTACK = ROOT / "analysis" / "attack_under_PO"
+for path in (ROOT, ANALYSIS, ATTACK):
+    if str(path) not in sys.path:
+        sys.path.insert(0, str(path))
+
+from counterfactual_batch1.scenarios import batch1_scenarios  # noqa: E402
 from region_merge_config import ABBR_TO_STATE_NAME  # noqa: E402
-from counterfactual_batch1.scenarios import batch1_scenarios, filter_scenarios  # noqa: E402
 
-DEFAULT_NETWORK_ROOT = ROOT / "outputs" / "network_graph_10km_2018_2026"
-DEFAULT_K5KM_ROOT = ROOT / "outputs" / "network_graph_5km_2018_2026"
-DEFAULT_OUT = ROOT / "results_cf_batch1_2023_pooled"
-DEFAULT_DENSIFY_CACHE = ROOT / "outputs" / "network_graph_cf_densify_2023"
-NETWORK_YEAR = 2023
+NETWORK_ROOT = ROOT / "outputs" / "1029-network-data-preprocessing-10km-geodesic-2018-2023"
+CACHE_ROOT = ROOT / "outputs" / "1031-network-expansion-comparators-2023"
+OUTPUT_ROOT = ROOT / "results_interventions_1031_network2023_pooled2018_2023"
 
 
-def _default_workers() -> int:
-    n = os.cpu_count() or 4
-    return max(1, min(12, n - 2))
+def _absolute(path: Path) -> Path:
+    return path if path.is_absolute() else ROOT / path
 
 
-def _git_rev() -> str:
+def _git_commit() -> str:
     try:
-        import subprocess
-
-        return (
-            subprocess.check_output(
-                ["git", "rev-parse", "HEAD"],
-                cwd=str(ROOT),
-                stderr=subprocess.DEVNULL,
-                text=True,
-            )
-            .strip()
-        )
+        return subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True
+        ).strip()
     except Exception:
         return "unknown"
 
 
-def members_abbr_to_full_names(members: str) -> list[str]:
-    names: list[str] = []
-    for abbr in members.split(","):
-        abbr = abbr.strip()
-        if abbr:
-            names.append(ABBR_TO_STATE_NAME.get(abbr, abbr))
-    return names
+def _member_names(members: str) -> list[str]:
+    return [ABBR_TO_STATE_NAME.get(x.strip(), x.strip()) for x in members.split(",") if x.strip()]
 
 
-def build_jobs(
-    network_root: Path,
-    only_units: set[str] | None,
-) -> list[dict]:
-    year_dir = network_root / str(NETWORK_YEAR)
-    summary_path = year_dir / "network_summary.csv"
-    net_dir = year_dir / "network_structures"
-    if not summary_path.is_file():
-        raise SystemExit(f"Missing {summary_path}")
-    summary = pd_read(summary_path)
-    jobs: list[dict] = []
-    for _, row in summary.iterrows():
+def _network_jobs(network_root: Path, year: int, selected: set[str]) -> list[dict]:
+    year_dir = network_root / str(year)
+    summary = pd.read_csv(year_dir / "network_summary.csv")
+    jobs = []
+    for row in summary.to_dict("records"):
         unit = str(row["unit"])
-        display = str(row.get("display_name", unit))
-        if only_units and unit not in only_units and display not in only_units:
+        label = str(row.get("display_name", unit))
+        if selected and unit not in selected and label not in selected:
             continue
-        pkl = net_dir / f"network_{unit}.pkl"
-        if not pkl.is_file():
-            # merged regions sometimes use network_region_*.pkl
-            alt = net_dir / f"network_region_{unit}.pkl"
-            pkl = alt if alt.is_file() else pkl
-        if not pkl.is_file():
-            print(f"[skip] missing pickle for {unit}")
-            continue
-        members = str(row.get("members", unit))
-        n_nodes = int(row["n_nodes"]) if "n_nodes" in row and pd_notna(row["n_nodes"]) else 0
+        graph_path = year_dir / "network_structures" / f"network_{unit}.pkl"
+        if not graph_path.is_file():
+            graph_path = year_dir / "network_structures" / f"network_region_{unit}.pkl"
+        if not graph_path.is_file():
+            raise FileNotFoundError(f"Missing network for {unit}")
         jobs.append(
             {
-                "label": display,
                 "unit": unit,
-                "member_states": members_abbr_to_full_names(members),
-                "pkl_path": str(pkl.resolve()),
-                "n_nodes": n_nodes,
+                "label": label,
+                "member_states": _member_names(str(row.get("members", unit))),
+                "pkl_path": graph_path.absolute(),
+                "n_nodes": int(row["n_nodes"]) if pd.notna(row.get("n_nodes")) else 0,
             }
         )
-    # Largest networks first so CA/NY/TX start immediately (long-tail makespan)
-    jobs.sort(key=lambda j: (-int(j.get("n_nodes", 0)), j["unit"]))
-    return jobs
+    return sorted(jobs, key=lambda job: (-job["n_nodes"], job["unit"]))
 
 
-def pd_notna(x) -> bool:
-    try:
-        import pandas as pd
+def _preflight(jobs: list[dict], deep: bool) -> dict:
+    from counterfactual_batch1.densify_network import validate_ev_afc_file
+    from monte_carlo_outage_attack import load_network
 
-        return bool(pd.notna(x))
-    except Exception:
-        return x is not None
+    required = {
+        "posterior": ROOT / "advi_results_2018_2023" / "county_advi_posterior.nc",
+        "county rates": ROOT / "advi_results_2018_2023" / "county_estimates_advi.csv",
+        "outage events": ROOT / "notebooks" / "PO_data_cleaning" / "cleaned_outages_2018_2023.csv",
+        "customer counts": ROOT / "notebooks" / "PO_data_cleaning" / "MCC.csv",
+        "coverage history": ROOT.parent / "24237376" / "coverage_history.csv",
+    }
+    missing = [f"{name}: {path}" for name, path in required.items() if not path.is_file()]
+    population = (
+        ROOT / "data" / "processed" / "pop_units_epicenter.gpkg",
+        ROOT / "data" / "processed" / "pop_units_epicenter.parquet",
+    )
+    if not any(path.is_file() for path in population):
+        missing.append("population epicenters: " + " or ".join(map(str, population)))
+    if missing:
+        raise FileNotFoundError("Missing inputs:\n  " + "\n  ".join(missing))
+
+    afc = validate_ev_afc_file()
+    print(
+        f"OK: official EV AFC corridors: {afc['n_segments']} segments, "
+        f"statuses={afc['statuses']}\n    {afc['path']}"
+    )
+    errors = []
+    for job in jobs:
+        graph = load_network(job["pkl_path"])
+        if graph.number_of_nodes() != job["n_nodes"]:
+            errors.append(f"{job['unit']}: node count differs from network_summary.csv")
+        if graph.number_of_nodes() < 2 or not nx.is_connected(graph.to_undirected()):
+            errors.append(f"{job['unit']}: network is empty or disconnected")
+    if errors:
+        raise ValueError("Invalid networks:\n  " + "\n  ".join(errors))
+
+    if not deep:
+        return afc
+    from compute_impact_radius import (
+        STATE_NAME_TO_ABBR,
+        load_county_geometry_and_mcc,
+        load_coverage_history,
+    )
+    from monte_carlo_outage_attack import load_county_polygons
+    from sample_lambda_from_posterior import load_posterior, prepare_outages_for_bootstrap
+    from select_epicenter_by_population import require_pop_units
+
+    counties, posterior = load_posterior()
+    if posterior.ndim != 2 or posterior.shape[1] != len(counties):
+        raise ValueError("Posterior county dimension does not match the county-rate table")
+    outages = prepare_outages_for_bootstrap(pd.read_csv(required["outage events"]))
+    county_info = load_county_geometry_and_mcc(ROOT)
+    coverage = load_coverage_history(ROOT)
+    population = require_pop_units(ROOT)
+    polygons = load_county_polygons(ROOT)
+    tables = (outages, county_info, coverage, population, polygons)
+    if any(table.empty for table in tables):
+        raise ValueError("At least one required input table is empty")
+
+    target_states = {state for job in jobs for state in job["member_states"]}
+    missing_states = target_states - set(counties["state"])
+    missing_pools = target_states - set(outages["state"])
+    if missing_states or missing_pools:
+        raise ValueError(
+            f"Missing posterior states={sorted(missing_states)}; "
+            f"missing historical pools={sorted(missing_pools)}"
+        )
+
+    target_counties = counties[counties["state"].isin(target_states)].copy()
+    target_fips = set(
+        target_counties["fips"].astype(int).astype(str).str.zfill(5)
+    )
+    county_info = county_info.set_index("fips_str").reindex(sorted(target_fips))
+    invalid_counties = county_info[
+        county_info[["MCC", "rho", "area_km2"]].isna().any(axis=1)
+        | (county_info["MCC"] <= 0)
+        | (county_info["rho"] <= 0)
+        | (county_info["area_km2"] <= 0)
+    ].index.tolist()
+    polygon_fips = set(polygons["fips_str"].astype(str).str.zfill(5))
+    missing_polygons = sorted(target_fips - polygon_fips)
+    if invalid_counties or missing_polygons:
+        raise ValueError(
+            f"Invalid MCC/area counties={invalid_counties[:10]}; "
+            f"missing county polygons={missing_polygons[:10]}"
+        )
+
+    relevant = outages[outages["state"].isin(target_states)].copy()
+    customer_col = "mean_customers" if "mean_customers" in relevant else "affected_customers"
+    invalid_events = (
+        ~np.isfinite(relevant["duration_hours"].astype(float))
+        | (relevant["duration_hours"].astype(float) < 0)
+        | ~np.isfinite(relevant[customer_col].astype(float))
+        | (relevant[customer_col].astype(float) < 0)
+    )
+    if invalid_events.any():
+        count = int(invalid_events.sum())
+        raise ValueError(f"Historical event pool contains {count} invalid rows")
+
+    if "year" not in relevant.columns:
+        relevant["year"] = pd.to_datetime(relevant["start_time"]).dt.year
+    relevant["state_abbr"] = relevant["state"].map(STATE_NAME_TO_ABBR)
+    coverage_keys = set(zip(coverage["state_abbr"], coverage["year_num"].astype(int)))
+    event_keys = set(zip(relevant["state_abbr"], relevant["year"].astype(int)))
+    missing_coverage = sorted(event_keys - coverage_keys, key=str)
+    if missing_coverage:
+        raise ValueError(f"Missing state-year coverage rows: {missing_coverage[:10]}")
+
+    pop_fips = set(population["county_fips"].astype(str).str.zfill(5))
+    population_fallbacks = len(target_fips - pop_fips)
+    print(
+        f"PASS: {len(jobs)} networks, {posterior.shape[0]} posterior draws, "
+        f"{posterior.shape[1]} counties, {len(outages)} events, and "
+        f"{population_fallbacks} county-polygon epicenter fallbacks"
+    )
+    return afc
 
 
-def pd_read(path: Path):
-    import pandas as pd
-
-    return pd.read_csv(path)
-
-
-def _worker(args: tuple) -> str:
-    (
-        label,
-        unit,
-        member_states,
-        pkl_path,
-        out_dir,
-        n_sims,
-        densify_cache,
-        k5km_root,
-        families,
-        keys,
-        force,
-        write_events,
-        bootstrap_pool,
-        epicenter_mode,
-    ) = args
-
-    os.environ.setdefault("OMP_NUM_THREADS", "1")
-    os.environ.setdefault("MKL_NUM_THREADS", "1")
-    os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
-    os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
-
-    attack = Path(__file__).resolve().parents[1]
-    root = Path(__file__).resolve().parents[3]
-    for p in (str(root), str(attack), str(attack)):
-        if p not in sys.path:
-            sys.path.insert(0, p)
-
+def _run_job(task: dict) -> str:
     from counterfactual_batch1.crn_engine import run_unit_batch1
-    from counterfactual_batch1.scenarios import batch1_scenarios, filter_scenarios
-
-    fam = {x.strip() for x in families.split(",") if x.strip()} or None
-    keyset = {x.strip() for x in keys.split(",") if x.strip()} or None
-    scenarios = filter_scenarios(batch1_scenarios(), fam, keyset)
-
-    k5 = Path(k5km_root) / str(NETWORK_YEAR) / "network_structures" / f"network_{unit}.pkl"
-    if not k5.is_file():
-        k5 = None
 
     return run_unit_batch1(
-        label=label,
-        unit=unit,
-        member_states=member_states,
-        pkl_path=Path(pkl_path),
-        out_dir=Path(out_dir),
-        scenarios=scenarios,
-        n_sims=n_sims,
-        project_root=root,
-        densify_cache=Path(densify_cache),
-        k5km_pkl=k5,
-        bootstrap_pool=bootstrap_pool,
-        outage_year=None,  # pooled
-        force=force,
-        write_events=write_events,
-        epicenter_mode=epicenter_mode,
+        label=task["label"],
+        unit=task["unit"],
+        member_states=task["member_states"],
+        pkl_path=task["pkl_path"],
+        out_dir=task["out"],
+        scenarios=task["scenarios"],
+        n_sims=task["n_sims"],
+        project_root=ROOT,
+        densify_cache=task["cache"],
+        force=task["force"],
+        write_events=task["write_events"],
+        epicenter_mode=task["epicenter_mode"],
     )
 
 
-def _write_panel(out_root: Path) -> None:
-    import pandas as pd
-
-    rows = []
-    for p in sorted(out_root.glob("*/summary.csv")):
-        rows.append(pd.read_csv(p))
-    if rows:
-        panel = pd.concat(rows, ignore_index=True)
-        panel.to_csv(out_root / "panel_scenario_summary.csv", index=False)
+def _write_panel(out: Path) -> None:
+    summaries = [pd.read_csv(path) for path in sorted(out.glob("*/summary.csv"))]
+    if summaries:
+        pd.concat(summaries, ignore_index=True).to_csv(
+            out / "panel_scenario_summary.csv", index=False
+        )
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="CF Batch1 parallel runner (2023×pooled)")
-    parser.add_argument("--network-root", type=str, default=str(DEFAULT_NETWORK_ROOT))
-    parser.add_argument("--k5km-root", type=str, default=str(DEFAULT_K5KM_ROOT))
-    parser.add_argument("--densify-cache", type=str, default=str(DEFAULT_DENSIFY_CACHE))
-    parser.add_argument("--out", type=str, default=str(DEFAULT_OUT))
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--network-root", type=Path, default=NETWORK_ROOT)
+    parser.add_argument("--network-year", type=int, default=2023)
+    parser.add_argument("--densify-cache", type=Path, default=CACHE_ROOT)
+    parser.add_argument("--out", type=Path, default=OUTPUT_ROOT)
     parser.add_argument("--n-sims", type=int, default=100)
-    parser.add_argument("--workers", type=int, default=None)
-    parser.add_argument("--only", type=str, default="", help="Comma-separated units")
+    parser.add_argument("--workers", type=int, default=os.cpu_count() or 1)
+    parser.add_argument("--only", default="", help="Comma-separated analytical units")
     parser.add_argument(
         "--families",
-        type=str,
-        default="baseline,CF-D,CF-S,U,K",
-        help="Comma families: baseline,CF-D,CF-D-pop,CF-D-null,CF-S,CF-T,U,K",
+        default="baseline,CF-D,Demand,CF-S",
+        help="Comma-separated scenario families",
     )
-    parser.add_argument("--keys", type=str, default="", help="Optional explicit scenario keys")
-    parser.add_argument("--bootstrap-pool", choices=("all", "severe_top10"), default="all")
     parser.add_argument(
         "--epicenter-mode",
-        type=str,
-        default="population",
         choices=("population", "station"),
-        help="population=census-tract (default); station=legacy appendix ablation",
+        default="population",
     )
     parser.add_argument("--force", action="store_true")
-    parser.add_argument("--no-events", action="store_true", help="Skip per-event gz dumps")
+    parser.add_argument("--no-events", action="store_true")
+    parser.add_argument("--check-only", action="store_true")
     args = parser.parse_args()
 
-    network_root = Path(args.network_root)
-    if not network_root.is_absolute():
-        network_root = ROOT / network_root
-    out_root = Path(args.out)
-    if not out_root.is_absolute():
-        out_root = ROOT / out_root
-    densify_cache = Path(args.densify_cache)
-    if not densify_cache.is_absolute():
-        densify_cache = ROOT / densify_cache
-    k5km_root = Path(args.k5km_root)
-    if not k5km_root.is_absolute():
-        k5km_root = ROOT / k5km_root
-
-    out_root.mkdir(parents=True, exist_ok=True)
-    densify_cache.mkdir(parents=True, exist_ok=True)
-
-    only_set = {x.strip() for x in args.only.split(",") if x.strip()} or None
-    jobs = build_jobs(network_root, only_set)
-    if not jobs:
-        raise SystemExit("No jobs.")
-
-    workers = args.workers if args.workers is not None else _default_workers()
-    fam = {x.strip() for x in args.families.split(",") if x.strip()} or None
-    keyset = {x.strip() for x in args.keys.split(",") if x.strip()} or None
-    sc = filter_scenarios(batch1_scenarios(), fam, keyset)
-
-    manifest = {
-        "batch": "cf_batch1_2023_pooled",
-        "network_year": NETWORK_YEAR,
-        "outage_pool": "pooled_2018_2023",
-        "epicenter_mode": args.epicenter_mode,
-        "cf_s_definition": "N_affected -x% => R_c *= sqrt(1-x)",
-        "n_sims": args.n_sims,
-        "n_units": len(jobs),
-        "scenarios": [s.key for s in sc],
-        "network_root": str(network_root),
-        "out": str(out_root),
-        "git_commit": _git_rev(),
-        "no_events": bool(args.no_events),
-        "metrics_include_P_hit": True,
-        "note_no_events": (
-            "Event gz optional; metrics_*.csv still has n_events, n_hit_events, "
-            "P_hit, L_event, E_loss_given_hit, total_rel_loss_x_duration, "
-            "total_rel_loss_x_duration_hit for §4.3."
-        ),
-    }
-    (out_root / "batch_manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
-
-    print(
-        f"[CF-B1] units={len(jobs)} scenarios={len(sc)} "
-        f"n_sims={args.n_sims} workers={workers}"
+    if args.n_sims < 1 or args.workers < 1:
+        raise ValueError("--n-sims and --workers must be positive")
+    network_root, cache, out = map(
+        _absolute, (args.network_root, args.densify_cache, args.out)
     )
-    print(f"  out -> {out_root}")
-    print(f"  scenarios: {', '.join(s.key for s in sc)}")
+    selected = {x.strip() for x in args.only.split(",") if x.strip()}
+    jobs = _network_jobs(network_root, args.network_year, selected)
+    expected = len(selected) if selected else 45
+    if not jobs or (not selected and len(jobs) != expected):
+        raise ValueError(f"Expected {expected} analytical units, found {len(jobs)}")
+    afc = _preflight(jobs, deep=args.check_only)
+    if args.check_only:
+        return
+
+    out.mkdir(parents=True, exist_ok=True)
+    cache.mkdir(parents=True, exist_ok=True)
+    workers = min(args.workers, len(jobs))
+    requested_families = {
+        family.strip() for family in args.families.split(",") if family.strip()
+    }
+    scenarios = [
+        scenario
+        for scenario in batch1_scenarios()
+        if scenario.family in requested_families
+    ]
+    if not scenarios:
+        raise ValueError(f"No scenarios matched --families={args.families!r}")
+    manifest = {
+        "created_utc": datetime.now(timezone.utc).isoformat(),
+        "git_commit": _git_commit(),
+        "network_root": str(network_root),
+        "network_year": args.network_year,
+        "outage_model": "pooled 2018-2023 posterior and event pool",
+        "state_rate": "sum of county rates",
+        "state_rate_definition": "Lambda_s = sum_c lambda_c",
+        "county_assignment": "county rate / state rate",
+        "epicenter": args.epicenter_mode,
+        "event_count": "Poisson draw from the summed county rates",
+        "coverage_adjustment": (
+            "state-year max_pct_covered; 2023 carries forward each state's 2022 value"
+        ),
+        "event_reset": "restore the original scenario network after every event",
+        "global_efficiency": "unweighted, with the original-node denominator fixed after removal",
+        "primary_intervention_metric": (
+            "loss among the original 2023 hypernodes; added nodes may serve as paths "
+            "but are excluded from the endpoint set and denominator"
+        ),
+        "corridor_intervention": (
+            "FHWA-designated EV Alternative Fuel Corridor candidates sampled every "
+            "50 miles and kept at least 10 km from all existing and added hypernodes"
+        ),
+        "corridor_source": afc,
+        "demand_comparator": (
+            "add exactly the corridor scenario's realized number of nodes, prioritizing "
+            "high-population census tracts with the same 10 km separation rule"
+        ),
+        "severity_intervention": "reduce affected customers, then recompute capped radius",
+        "scenarios": [scenario.key for scenario in scenarios],
+        "n_sims": args.n_sims,
+        "workers": workers,
+        "write_event_files": not args.no_events,
+    }
+    (out / "batch_manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+
+    tasks = [
+        {
+            **job,
+            "out": out,
+            "cache": cache,
+            "n_sims": args.n_sims,
+            "force": args.force,
+            "write_events": not args.no_events,
+            "scenarios": scenarios,
+            "epicenter_mode": args.epicenter_mode,
+        }
+        for job in jobs
+    ]
     print(
-        "  schedule (largest |V| first): "
-        + ", ".join(f"{j['unit']}(n={j.get('n_nodes', '?')})" for j in jobs[:8])
-        + (" ..." if len(jobs) > 8 else ""),
+        f"[Interventions] units={len(tasks)} scenarios={len(scenarios)} "
+        f"sims={args.n_sims} workers={workers}\nout={out}",
         flush=True,
     )
 
-    # Cap workers at n_jobs (no benefit beyond one process per unit)
-    workers = max(1, min(int(workers), len(jobs)))
-    print(f"  workers (capped): {workers}", flush=True)
-
-    task_args = [
-        (
-            j["label"],
-            j["unit"],
-            j["member_states"],
-            j["pkl_path"],
-            str(out_root),
-            args.n_sims,
-            str(densify_cache),
-            str(k5km_root),
-            args.families,
-            args.keys,
-            args.force,
-            not args.no_events,
-            args.bootstrap_pool,
-            args.epicenter_mode,
-        )
-        for j in jobs
-    ]
-
-    results: list[str] = []
-    t0 = time.time()
-    if workers <= 1:
-        for a in task_args:
-            results.append(_worker(a))
+    started = time.time()
+    results = []
+    if workers == 1:
+        for task in tasks:
+            result = _run_job(task)
+            results.append(result)
+            print(result, flush=True)
     else:
-        with ProcessPoolExecutor(max_workers=workers) as ex:
-            futs = {ex.submit(_worker, a): a[1] for a in task_args}
-            for fut in as_completed(futs):
-                unit = futs[fut]
+        with ProcessPoolExecutor(max_workers=workers) as executor:
+            futures = {executor.submit(_run_job, task): task["unit"] for task in tasks}
+            for future in as_completed(futures):
+                unit = futures[future]
                 try:
-                    r = fut.result()
-                except Exception as e:
-                    r = f"error:{unit}:{e}"
-                results.append(r)
-                print(r, flush=True)
+                    result = future.result()
+                except Exception as error:
+                    result = f"error:{unit}:{error}"
+                results.append(result)
+                print(result, flush=True)
 
-    _write_panel(out_root)
-    ok = sum(1 for r in results if r.startswith("ok:"))
-    skip = sum(1 for r in results if r.startswith("skip:"))
+    _write_panel(out)
+    failures = [result for result in results if not result.startswith(("ok:", "skip:"))]
     print(
-        f"[CF-B1] done ok={ok} skip={skip} other={len(results)-ok-skip} "
-        f"in {(time.time()-t0)/60:.1f} min"
+        f"[Interventions] done ok={sum(r.startswith('ok:') for r in results)} "
+        f"skip={sum(r.startswith('skip:') for r in results)} "
+        f"failed={len(failures)} in {(time.time() - started) / 60:.1f} min"
     )
+    if failures:
+        raise RuntimeError("Incomplete units:\n  " + "\n  ".join(failures))
 
 
 if __name__ == "__main__":

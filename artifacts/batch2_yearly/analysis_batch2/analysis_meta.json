@@ -1,0 +1,7 @@
+{
+  "batch_dir": "/opt/data_repo/mliang_work/Pro_directory/results_batch2_yearly",
+  "n_boot": 200,
+  "ci": "90% percentile bootstrap over sims",
+  "ODI": "U_B/(U_B+U_C) with U=1-Spearman; outage share of rank instability",
+  "NDI": "U_C/(U_B+U_C); network share of rank instability"
+}

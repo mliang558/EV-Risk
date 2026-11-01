@@ -4,9 +4,11 @@ Step 2: Build per-state charging networks from Step 1 station table (default 200
 
 Method
 ------
-1. 200 m radius spatial clustering (sum capacity within each cluster).
-2. Voronoi tessellation adjacency (Delaunay fallback).
-3. Edge weight = normalized geographic distance: d_ij / d_max (within state).
+1. Fixed-radius spatial clustering using WGS84 geodesic distance
+   (sum capacity within each cluster).
+2. Voronoi tessellation in a local azimuthal-equidistant projection
+   (Delaunay fallback).
+3. Edge weight = normalized WGS84 geodesic distance: d_ij / d_max.
 
 Input (default)
 ---------------
@@ -38,12 +40,14 @@ import networkx as nx
 import numpy as np
 import pandas as pd
 from scipy.spatial import Delaunay, Voronoi
+from pyproj import CRS, Geod, Transformer
 
-from run_charging_network import STATES_ORDER, _to_epsg3857_meters
+from run_charging_network import STATES_ORDER
 
 CLUSTER_RADIUS_M = 200.0
 MIN_NODES = 3
 CAPACITY_WEIGHTS = (5.0, 25.0, 300.0)  # L1, L2, DC
+WGS84_GEOD = Geod(ellps="WGS84")
 
 
 def hypernode_capacity(n_l1: float, n_l2: float, n_dc: float) -> float:
@@ -83,9 +87,26 @@ def cluster_stations(
     n_l2: np.ndarray | None = None,
     n_dc: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Greedy fixed-radius clustering; sum n_l1, n_l2, n_dc (and capacity) per cluster."""
-    coords_m = _to_epsg3857_meters(coords_ll[:, 0], coords_ll[:, 1])
-    used = np.zeros(len(coords_m), dtype=bool)
+    """Deterministic greedy clustering using WGS84 geodesic distance.
+
+    Stations are sorted by latitude and longitude before clustering, so input
+    row order cannot change the result.  Each cluster contains the first
+    unassigned station and every still-unassigned station within ``radius_m``
+    of that seed.
+    """
+    coords_ll = np.asarray(coords_ll, dtype=np.float64)
+    capacities = np.asarray(capacities, dtype=np.float64)
+    order = np.lexsort((coords_ll[:, 1], coords_ll[:, 0]))
+    coords_ll = coords_ll[order]
+    capacities = capacities[order]
+    if n_l1 is not None:
+        n_l1 = np.asarray(n_l1, dtype=np.float64)[order]
+    if n_l2 is not None:
+        n_l2 = np.asarray(n_l2, dtype=np.float64)[order]
+    if n_dc is not None:
+        n_dc = np.asarray(n_dc, dtype=np.float64)[order]
+
+    used = np.zeros(len(coords_ll), dtype=bool)
     centers: list[np.ndarray] = []
     caps: list[float] = []
     counts: list[int] = []
@@ -94,10 +115,17 @@ def cluster_stations(
     dcs: list[float] = []
     has_evse = n_l1 is not None and n_l2 is not None and n_dc is not None
 
-    for i in range(len(coords_m)):
+    for i in range(len(coords_ll)):
         if used[i]:
             continue
-        dists = np.linalg.norm(coords_m - coords_m[i], axis=1)
+        seed_lat, seed_lon = coords_ll[i]
+        _, _, dists = WGS84_GEOD.inv(
+            np.full(len(coords_ll), seed_lon),
+            np.full(len(coords_ll), seed_lat),
+            coords_ll[:, 1],
+            coords_ll[:, 0],
+        )
+        dists = np.asarray(dists, dtype=np.float64)
         idx = (~used) & (dists <= radius_m)
         idx_indices = np.where(idx)[0]
         centers.append(coords_ll[idx_indices].mean(axis=0))
@@ -127,6 +155,42 @@ def cluster_stations(
     )
 
 
+def _to_local_aeqd_meters(coords_ll: np.ndarray) -> tuple[np.ndarray, str]:
+    """Project WGS84 points to a local azimuthal-equidistant CRS.
+
+    The projection is centered on the analytical unit.  It has no fixed EPSG
+    code; the complete PROJ definition is returned for provenance.
+    """
+    coords_ll = np.asarray(coords_ll, dtype=np.float64)
+    lat_0 = float(np.mean(coords_ll[:, 0]))
+    lon_0 = float(np.mean(coords_ll[:, 1]))
+    proj4 = (
+        f"+proj=aeqd +lat_0={lat_0:.12f} +lon_0={lon_0:.12f} "
+        "+datum=WGS84 +units=m +no_defs"
+    )
+    target = CRS.from_proj4(proj4)
+    transformer = Transformer.from_crs("EPSG:4326", target, always_xy=True)
+    x, y = transformer.transform(coords_ll[:, 1], coords_ll[:, 0])
+    return np.column_stack([x, y]).astype(np.float64), proj4
+
+
+def _geodesic_distance_matrix(coords_ll: np.ndarray) -> np.ndarray:
+    """Pairwise WGS84 geodesic distances in meters."""
+    coords_ll = np.asarray(coords_ll, dtype=np.float64)
+    n = len(coords_ll)
+    out = np.zeros((n, n), dtype=np.float64)
+    for i in range(n):
+        _, _, dist = WGS84_GEOD.inv(
+            np.full(n - i - 1, coords_ll[i, 1]),
+            np.full(n - i - 1, coords_ll[i, 0]),
+            coords_ll[i + 1 :, 1],
+            coords_ll[i + 1 :, 0],
+        )
+        out[i, i + 1 :] = np.asarray(dist, dtype=np.float64)
+        out[i + 1 :, i] = out[i, i + 1 :]
+    return out
+
+
 def add_hypernode_to_graph(
     G: nx.Graph,
     node_id: int,
@@ -150,16 +214,18 @@ def add_hypernode_to_graph(
     )
 
 
-def voronoi_adjacency(coords_3857: np.ndarray) -> set[tuple[int, int]]:
+def voronoi_adjacency(coords_m: np.ndarray) -> set[tuple[int, int]]:
     try:
-        vor = Voronoi(coords_3857)
+        vor = Voronoi(coords_m)
         adj: set[tuple[int, int]] = set()
         for p1, p2 in vor.ridge_points:
             a, b = (p1, p2) if p1 < p2 else (p2, p1)
             adj.add((a, b))
         return adj
     except Exception:
-        tri = Delaunay(coords_3857)
+        # ``QJ`` resolves exactly collinear or nearly degenerate point sets
+        # without changing the intended Delaunay fallback.
+        tri = Delaunay(coords_m, qhull_options="QJ")
         adj = set()
         for simplex in tri.simplices:
             for i in range(3):
@@ -170,13 +236,16 @@ def voronoi_adjacency(coords_3857: np.ndarray) -> set[tuple[int, int]]:
         return adj
 
 
-def build_state_graph(
+def build_region_graph(
     df: pd.DataFrame,
-    state: str,
+    member_states: list[str] | tuple[str, ...],
+    region_name: str,
     radius_m: float = CLUSTER_RADIUS_M,
+    min_nodes: int = MIN_NODES,
 ) -> tuple[nx.Graph | None, dict | None]:
-    sub = df[df["state"] == state]
-    if len(sub) < MIN_NODES:
+    """Build one graph after combining all station rows in an analytical unit."""
+    sub = df[df["state"].isin(member_states)].copy()
+    if len(sub) < 1:
         return None, None
 
     coords_ll = sub[["lat", "lon"]].values.astype(np.float64)
@@ -190,13 +259,18 @@ def build_state_graph(
         coords_ll, capacities, radius_m=radius_m, n_l1=n_l1, n_l2=n_l2, n_dc=n_dc
     )
     n_nodes = len(centers)
-    if n_nodes < MIN_NODES:
+    if n_nodes < min_nodes:
         return None, None
 
-    coords_3857 = _to_epsg3857_meters(centers[:, 0], centers[:, 1])
-    adj = voronoi_adjacency(coords_3857)
-    dist_matrix = np.linalg.norm(coords_3857[:, None] - coords_3857[None, :], axis=2)
-    dist_max = float(np.max(dist_matrix))
+    coords_planar, voronoi_crs = _to_local_aeqd_meters(centers)
+    if n_nodes < 4:
+        adj = {(a, b) for a in range(n_nodes) for b in range(a + 1, n_nodes)}
+        adjacency_method = "complete_small"
+    else:
+        adj = voronoi_adjacency(coords_planar)
+        adjacency_method = "voronoi_local_aeqd"
+    dist_matrix = _geodesic_distance_matrix(centers)
+    dist_max = float(np.max(dist_matrix)) if n_nodes > 1 else 1.0
     if dist_max <= 0:
         dist_max = 1.0
 
@@ -218,15 +292,35 @@ def build_state_graph(
         w = d_m / dist_max
         G.add_edge(a, b, weight=w, distance_m=d_m)
 
+    if n_nodes > 0 and not nx.is_connected(G):
+        raise RuntimeError(
+            f"Network construction produced a disconnected graph for {region_name}: "
+            f"{nx.number_connected_components(G)} components"
+        )
+
     stats = {
-        "state": state,
+        "state": region_name,
+        "member_states": list(member_states),
         "n_raw": n_raw,
         "n_nodes": n_nodes,
         "n_edges": G.number_of_edges(),
         "cluster_radius_m": float(radius_m),
         "dist_max_m": dist_max,
+        "cluster_distance": "WGS84_geodesic",
+        "station_order": "latitude_then_longitude",
+        "adjacency": adjacency_method,
+        "voronoi_crs": voronoi_crs,
     }
     return G, stats
+
+
+def build_state_graph(
+    df: pd.DataFrame,
+    state: str,
+    radius_m: float = CLUSTER_RADIUS_M,
+) -> tuple[nx.Graph | None, dict | None]:
+    """Backward-compatible wrapper for a single-state analytical unit."""
+    return build_region_graph(df, [state], state, radius_m=radius_m, min_nodes=MIN_NODES)
 
 
 def build_all(

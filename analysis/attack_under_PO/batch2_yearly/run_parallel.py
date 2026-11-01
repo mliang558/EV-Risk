@@ -1,13 +1,9 @@
 #!/usr/bin/env python3
-"""
-Batch 2 parallel launcher — families A / B / C (baseline only).
+"""Run the A/B/C temporal robustness experiments.
 
-A: net t × outage t
-B: net 2023 × outage t   (t=2018..2022 by default; t=2023 shared with A)
-C: net t × pooled outages (Batch-1-like λ, no r scaling)
-
-Usage:
-  python analysis/attack_under_PO/batch2_yearly/run_parallel.py --families A B C
+This Python file is the only command-line entry point for Batch 2.  It reads
+ordinary command-line arguments, validates them, and distributes independent
+analytical-unit jobs across local CPU workers.
 """
 
 from __future__ import annotations
@@ -21,10 +17,33 @@ import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
+# Each analytical unit is already a separate process.  Keep numerical
+# libraries single-threaded so --workers controls total CPU use predictably.
+for variable in (
+    "OMP_NUM_THREADS",
+    "MKL_NUM_THREADS",
+    "OPENBLAS_NUM_THREADS",
+    "NUMEXPR_NUM_THREADS",
+):
+    os.environ.setdefault(variable, "1")
+
 import pandas as pd
 
-ROOT = Path(__file__).resolve().parents[3]
-ATTACK = Path(__file__).resolve().parents[1]
+def _project_root() -> Path:
+    """Prefer the checkout being run; do not follow linked code into another clone."""
+    marker = Path("notebooks/PO_data_cleaning/cleaned_outages_2018_2023.csv")
+    candidates = (Path.cwd(), Path(__file__).absolute().parents[3])
+    for candidate in candidates:
+        if (candidate / marker).is_file():
+            return candidate
+    raise FileNotFoundError(
+        "Run this command from the EV-Risk-review checkout containing "
+        f"{marker.as_posix()}"
+    )
+
+
+ROOT = _project_root()
+ATTACK = ROOT / "analysis" / "attack_under_PO"
 for p in (ROOT, ATTACK):
     if str(p) not in sys.path:
         sys.path.insert(0, str(p))
@@ -51,7 +70,7 @@ def _units_for_year(network_root: Path, year: int, only: set[str] | None) -> lis
     summary = year_dir / "network_summary.csv"
     net_dir = year_dir / "network_structures"
     if not summary.is_file():
-        return []
+        raise FileNotFoundError(f"Missing network summary: {summary}")
     df = pd.read_csv(summary)
     jobs = []
     for _, row in df.iterrows():
@@ -64,14 +83,16 @@ def _units_for_year(network_root: Path, year: int, only: set[str] | None) -> lis
             alt = net_dir / f"network_region_{unit}.pkl"
             pkl = alt if alt.is_file() else pkl
         if not pkl.is_file():
-            continue
+            raise FileNotFoundError(f"Missing network graph for {unit}: {pkl}")
         members = str(row.get("members", unit))
         jobs.append(
             {
                 "unit": unit,
                 "label": display,
                 "member_states": members_abbr_to_full_names(members),
-                "pkl_path": str(pkl.resolve()),
+                # Keep the path anchored to the active checkout.  Path.resolve()
+                # can follow a linked outputs directory into another clone.
+                "pkl_path": str(pkl.absolute()),
                 "n_nodes": int(row.get("n_nodes", 0) or 0),
             }
         )
@@ -154,18 +175,19 @@ def _worker(args: tuple) -> str:
         unit,
         member_states,
         pkl_path,
+        project_root,
         out_root,
         n_sims,
         force,
         write_events,
         share_as_B2023,
+        event_mode,
     ) = args
 
-    os.environ.setdefault("OMP_NUM_THREADS", "1")
-    os.environ.setdefault("MKL_NUM_THREADS", "1")
-
-    root = Path(__file__).resolve().parents[3]
-    attack = Path(__file__).resolve().parents[1]
+    # Worker processes must use the same checkout selected by the parent.
+    # Resolving __file__ can follow linked source files into another clone.
+    root = Path(project_root)
+    attack = root / "analysis" / "attack_under_PO"
     for p in (str(root), str(attack)):
         if p not in sys.path:
             sys.path.insert(0, p)
@@ -188,6 +210,7 @@ def _worker(args: tuple) -> str:
         project_root=root,
         force=bool(force),
         write_events=bool(write_events),
+        event_mode=str(event_mode),
     )
 
     if share_as_B2023:
@@ -232,25 +255,92 @@ def _worker(args: tuple) -> str:
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Batch 2 yearly A/B/C parallel runner")
-    ap.add_argument("--network-root", type=str, default=str(DEFAULT_NETWORK_ROOT))
-    ap.add_argument("--out", type=str, default=str(DEFAULT_OUT))
-    ap.add_argument("--families", nargs="+", default=["A", "B", "C"])
-    ap.add_argument("--years", type=int, nargs="+", default=list(YEARS))
-    ap.add_argument("--n-sims", type=int, default=100)
-    ap.add_argument("--workers", type=int, default=None)
-    ap.add_argument("--only", type=str, default="")
-    ap.add_argument("--force", action="store_true")
+    ap = argparse.ArgumentParser(
+        description="Run temporal robustness experiments in parallel."
+    )
+    ap.add_argument(
+        "--network-root",
+        type=str,
+        default=str(DEFAULT_NETWORK_ROOT),
+        help="Folder containing one network subfolder per year.",
+    )
+    ap.add_argument(
+        "--out",
+        type=str,
+        default=str(DEFAULT_OUT),
+        help="New or existing output folder.",
+    )
+    ap.add_argument(
+        "--experiments",
+        "--families",
+        dest="families",
+        nargs="+",
+        default=["A", "B", "C"],
+        help=(
+            "A = matched network/outage year; B = fixed 2023 network with each "
+            "outage year; C = changing network with pooled outages"
+        ),
+    )
+    ap.add_argument(
+        "--years",
+        type=int,
+        nargs="+",
+        default=list(YEARS),
+        help="Outage/network years to include.",
+    )
+    ap.add_argument(
+        "--n-sims",
+        type=int,
+        default=100,
+        help="Monte Carlo replications per analytical unit.",
+    )
+    ap.add_argument(
+        "--workers",
+        type=int,
+        default=None,
+        help="Parallel workers; defaults to the available CPU count.",
+    )
+    ap.add_argument(
+        "--only",
+        type=str,
+        default="",
+        help="Optional comma-separated analytical units, for example TX,CA.",
+    )
+    ap.add_argument(
+        "--force",
+        action="store_true",
+        help="Recompute completed unit outputs instead of skipping them.",
+    )
+    ap.add_argument(
+        "--event-mode",
+        choices=("lambda_bootstrap", "replay"),
+        default="lambda_bootstrap",
+        help=(
+            "replay uses every observed event once and redraws only its epicenter; "
+            "lambda_bootstrap retains the legacy sampling method"
+        ),
+    )
     ap.add_argument(
         "--write-events",
         action="store_true",
-        help="Write per-sim event dumps (default off)",
+        help="Write large per-simulation event files (off by default).",
     )
     args = ap.parse_args()
+
+    args.families = [family.upper() for family in args.families]
+    invalid_families = sorted(set(args.families) - {"A", "B", "C"})
+    if invalid_families:
+        ap.error(f"Unknown families: {invalid_families}")
+    if args.event_mode == "replay" and "C" in args.families:
+        ap.error("Replay mode supports A and B only; C uses pooled lambda_bootstrap")
 
     network_root = Path(args.network_root)
     if not network_root.is_absolute():
         network_root = ROOT / network_root
+    if not network_root.is_dir():
+        ap.error(f"Network root not found: {network_root}")
+    if "B" in args.families and not (network_root / "2023").is_dir():
+        ap.error(f"B requires a 2023 network directory under: {network_root}")
     out_root = Path(args.out)
     if not out_root.is_absolute():
         out_root = ROOT / out_root
@@ -263,19 +353,38 @@ def main() -> None:
         network_root=network_root,
         only=only,
     )
+    if not jobs:
+        ap.error("No jobs were built; check network root, years, and --only")
 
-    # write r table once
     outages = ensure_outage_year(
         pd.read_csv(
             ROOT / "notebooks" / "PO_data_cleaning" / "cleaned_outages_2018_2023.csv"
         )
     )
-    r_table = build_r_table(outages)
-    save_r_table(r_table, out_root / "r_st_table.csv")
+    if args.event_mode == "replay":
+        (
+            outages.groupby(["state", "year"], observed=True)
+            .size()
+            .rename("n_observed_events")
+            .reset_index()
+            .to_csv(out_root / "observed_event_counts.csv", index=False)
+        )
+    else:
+        save_r_table(build_r_table(outages), out_root / "r_st_table.csv")
 
     nproc = os.cpu_count() or 8
     workers = args.workers if args.workers is not None else nproc
     workers = max(1, min(int(workers), max(len(jobs), 1)))
+
+    print("[Temporal robustness] configuration", flush=True)
+    print(f"  experiments : {', '.join(args.families)}", flush=True)
+    print(f"  years       : {', '.join(map(str, args.years))}", flush=True)
+    print(f"  event mode  : {args.event_mode}", flush=True)
+    print(f"  simulations : {args.n_sims}", flush=True)
+    print(f"  workers     : {workers}", flush=True)
+    print(f"  project     : {ROOT}", flush=True)
+    print(f"  networks    : {network_root.absolute()}", flush=True)
+    print(f"  output      : {out_root.absolute()}", flush=True)
 
     write_events = bool(args.write_events)
     (out_root / "batch_manifest.json").write_text(
@@ -285,13 +394,24 @@ def main() -> None:
                 "years": args.years,
                 "n_sims": args.n_sims,
                 "n_jobs": len(jobs),
-                "note": "A_2023 written once and copied to B_2023 with assert",
+                "event_mode": args.event_mode,
+                "project_root": str(ROOT),
+                "network_root": str(network_root.absolute()),
+                "network_root_resolved": str(network_root.resolve()),
+                "note": (
+                    "Replay: every observed event once; only epicenter varies"
+                    if args.event_mode == "replay"
+                    else "Lambda-bootstrap legacy mode"
+                ),
             },
             indent=2,
         ),
         encoding="utf-8",
     )
-    print(f"[Batch2] jobs={len(jobs)} workers={workers} out={out_root}", flush=True)
+    print(
+        f"[Temporal robustness] starting {len(jobs)} analytical-unit jobs",
+        flush=True,
+    )
 
     task_args = [
         (
@@ -302,11 +422,13 @@ def main() -> None:
             j["unit"],
             j["member_states"],
             j["pkl_path"],
+            str(ROOT),
             str(out_root),
             args.n_sims,
             args.force,
             write_events,
             j.get("share_as_B2023", False),
+            args.event_mode,
         )
         for j in jobs
     ]
@@ -336,10 +458,13 @@ def main() -> None:
                 else:
                     other += 1
     print(
-        f"[Batch2] done ok={ok} skip={skip} other={other} "
+        f"[Temporal robustness] finished: completed={ok}, skipped={skip}, "
+        f"incomplete={other}, "
         f"in {(time.time()-t0)/60:.1f} min",
         flush=True,
     )
+    if other:
+        raise RuntimeError(f"Temporal robustness run ended with {other} incomplete jobs")
 
 
 if __name__ == "__main__":

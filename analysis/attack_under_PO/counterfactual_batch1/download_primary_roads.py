@@ -6,9 +6,15 @@ from __future__ import annotations
 import argparse
 import hashlib
 from pathlib import Path
+import sys
 import tempfile
 import urllib.request
 import zipfile
+
+# Allow this file to be executed directly from any working directory.
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 from densify_network import PRIMARY_ROADS_FILENAME, PRIMARY_ROADS_URL, ROOT
 

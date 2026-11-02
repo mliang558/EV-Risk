@@ -45,7 +45,7 @@ def test_candidates_are_inside_tracts_and_on_roads():
         assert roads.geometry.union_all().distance(point) < 1e-9
 
 
-def test_selection_follows_population_order_and_reports_short_candidate_pool():
+def test_selection_follows_population_order_and_adds_on_road_candidates():
     tracts, roads = _inputs()
     sites, eligible, candidates, _ = _select_demand_sites(
         tracts,
@@ -54,7 +54,7 @@ def test_selection_follows_population_order_and_reports_short_candidate_pool():
         target=3,
         min_distance_m=10_000,
     )
-    assert len(candidates) == 2
-    assert eligible == 2
-    assert len(sites) == 2
+    assert len(candidates) > 2
+    assert eligible >= 3
+    assert len(sites) == 3
     assert sites[0, 1] < sites[1, 1]

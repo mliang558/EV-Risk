@@ -37,7 +37,8 @@ from analysis.build_charging_network_step2 import (
 CLUSTER_RADIUS_M = 10_000.0
 CORRIDOR_SPACING_M = 50 * 1609.344
 CACHE_SCHEMA = "fhwa_ev_afc_50mi_10km_unit_boundary_v4"
-DEMAND_CACHE_SCHEMA = "population_primary_road_matched_count_10km_v2"
+DEMAND_CACHE_SCHEMA = "population_primary_road_matched_count_10km_v3"
+DEMAND_CANDIDATE_SPACING_M = CLUSTER_RADIUS_M / 2
 AFC_FILENAME = "ntad_ev_alternative_fuel_corridors_round8_2025.geojson"
 PRIMARY_ROADS_FILENAME = "tl_2023_us_primaryroads.zip"
 PRIMARY_ROADS_URL = (
@@ -523,6 +524,94 @@ def _demand_road_candidates(pop_units, primary_roads) -> pd.DataFrame:
     ).reset_index(drop=True)
 
 
+def _supplemental_demand_road_candidates(
+    pop_units,
+    primary_roads,
+    spacing_m: float = DEMAND_CANDIDATE_SPACING_M,
+) -> pd.DataFrame:
+    """Sample extra on-road positions when one point per tract is insufficient."""
+    import geopandas as gpd
+    from shapely.ops import linemerge, unary_union
+
+    columns = ["population", "tract_geoid", "lat", "lon", "road_snap_distance_m"]
+    if pop_units.empty or primary_roads.empty:
+        return pd.DataFrame(columns=columns)
+    if spacing_m <= 0:
+        raise ValueError("Demand candidate spacing must be positive")
+
+    tracts = pop_units.to_crs(4326).copy()
+    roads = primary_roads.to_crs(4326).copy()
+    min_lon, min_lat, max_lon, max_lat = tracts.total_bounds
+    projection = (
+        f"+proj=aeqd +lat_0={(min_lat + max_lat) / 2:.12f} "
+        f"+lon_0={(min_lon + max_lon) / 2:.12f} +datum=WGS84 +units=m +no_defs"
+    )
+    tracts_m = tracts.to_crs(projection)
+    roads_m = roads.to_crs(projection)
+    road_index = roads_m.sindex
+
+    records = []
+    points = []
+    for index, row in tracts_m.iterrows():
+        population = float(row["population"])
+        tract = row.geometry
+        if population <= 0 or tract is None or tract.is_empty:
+            continue
+        matches = list(road_index.query(tract, predicate="intersects"))
+        pieces = [
+            geometry.intersection(tract)
+            for geometry in roads_m.geometry.iloc[matches]
+            if geometry is not None and not geometry.is_empty
+        ]
+        line_parts = []
+        for geometry in pieces:
+            if geometry.is_empty:
+                continue
+            if geometry.geom_type == "LineString":
+                line_parts.append(geometry)
+            elif geometry.geom_type in ("MultiLineString", "GeometryCollection"):
+                line_parts.extend(
+                    part for part in geometry.geoms if part.geom_type == "LineString"
+                )
+        if not line_parts:
+            continue
+        merged = unary_union(line_parts)
+        if merged.geom_type not in ("LineString", "MultiLineString"):
+            merged = linemerge(merged)
+        lines = [merged] if merged.geom_type == "LineString" else list(merged.geoms)
+        for line in lines:
+            if line.is_empty or line.length <= 0:
+                continue
+            distances = (
+                [line.length / 2]
+                if line.length <= spacing_m
+                else np.arange(spacing_m / 2, line.length, spacing_m)
+            )
+            for distance in distances:
+                points.append(line.interpolate(float(distance)))
+                records.append(
+                    {
+                        "population": population,
+                        "tract_geoid": str(row.get("tract_geoid", index)),
+                        "road_snap_distance_m": 0.0,
+                    }
+                )
+
+    if not records:
+        return pd.DataFrame(columns=columns)
+    points_wgs84 = gpd.GeoSeries(points, crs=projection).to_crs(4326)
+    for record, point in zip(records, points_wgs84):
+        record.update(lat=float(point.y), lon=float(point.x))
+    candidates = pd.DataFrame(records)
+    candidates["_lat_key"] = candidates["lat"].round(8)
+    candidates["_lon_key"] = candidates["lon"].round(8)
+    candidates = candidates.sort_values(
+        ["population", "tract_geoid", "lat", "lon"],
+        ascending=[False, True, True, True],
+    ).drop_duplicates(["_lat_key", "_lon_key"])
+    return candidates[columns].reset_index(drop=True)
+
+
 def _select_demand_sites(
     pop_units,
     primary_roads,
@@ -533,25 +622,48 @@ def _select_demand_sites(
     """Select population-ranked road candidates subject to node spacing."""
     if target <= 0 or pop_units.empty:
         return np.empty((0, 2)), 0, pd.DataFrame(), np.empty(0)
-    candidates = _demand_road_candidates(pop_units, primary_roads)
+    primary = _demand_road_candidates(pop_units, primary_roads)
 
     selected = []
     selected_snap_distances = []
     occupied = existing.copy()
-    eligible = 0
-    for row in candidates.itertuples(index=False):
-        lat, lon = float(row.lat), float(row.lon)
-        point = np.asarray([[lat, lon]], dtype=float)
-        if _minimum_distances(point, existing)[0] < min_distance_m:
-            continue
-        eligible += 1
-        if _minimum_distances(point, occupied)[0] < min_distance_m:
-            continue
-        selected.append(point[0])
-        selected_snap_distances.append(float(row.road_snap_distance_m))
-        occupied = np.vstack((occupied, point))
-        if len(selected) == target:
-            break
+
+    def add_from(table: pd.DataFrame) -> None:
+        nonlocal occupied
+        for row in table.itertuples(index=False):
+            lat, lon = float(row.lat), float(row.lon)
+            point = np.asarray([[lat, lon]], dtype=float)
+            if _minimum_distances(point, occupied)[0] < min_distance_m:
+                continue
+            selected.append(point[0])
+            selected_snap_distances.append(float(row.road_snap_distance_m))
+            occupied = np.vstack((occupied, point))
+            if len(selected) == target:
+                return
+
+    # Preserve the original rule whenever one on-road point per tract suffices.
+    add_from(primary)
+    supplemental = pd.DataFrame(columns=primary.columns)
+    if len(selected) < target:
+        supplemental = _supplemental_demand_road_candidates(
+            pop_units, primary_roads, spacing_m=min_distance_m / 2
+        )
+        if not supplemental.empty and not primary.empty:
+            primary_keys = set(zip(primary["lat"].round(8), primary["lon"].round(8)))
+            supplemental = supplemental[
+                [
+                    (round(row.lat, 8), round(row.lon, 8)) not in primary_keys
+                    for row in supplemental.itertuples(index=False)
+                ]
+            ].reset_index(drop=True)
+        add_from(supplemental)
+
+    candidates = pd.concat([primary, supplemental], ignore_index=True)
+    if candidates.empty:
+        eligible = 0
+    else:
+        coordinates = candidates[["lat", "lon"]].to_numpy(dtype=float)
+        eligible = int((_minimum_distances(coordinates, existing) >= min_distance_m).sum())
     sites = np.asarray(selected) if selected else np.empty((0, 2))
     return sites, eligible, candidates, np.asarray(selected_snap_distances)
 
@@ -610,6 +722,7 @@ def build_demand_network(
         "n_population_tracts": int(len(pop_units)),
         "n_candidates": int(len(candidates)),
         "n_candidates_eligible": int(eligible_count),
+        "candidate_spacing_m": float(cluster_radius_m / 2),
         "cluster_radius_m": float(cluster_radius_m),
         "min_distance_to_existing_m": (
             float(_minimum_distances(sites, existing).min()) if added else None

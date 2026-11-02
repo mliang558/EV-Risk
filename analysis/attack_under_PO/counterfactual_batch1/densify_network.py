@@ -37,7 +37,7 @@ from analysis.build_charging_network_step2 import (
 CLUSTER_RADIUS_M = 10_000.0
 CORRIDOR_SPACING_M = 50 * 1609.344
 CACHE_SCHEMA = "fhwa_ev_afc_50mi_10km_unit_boundary_v4"
-DEMAND_CACHE_SCHEMA = "population_primary_road_matched_count_10km_v3"
+DEMAND_CACHE_SCHEMA = "population_primary_road_matched_count_10km_v4"
 DEMAND_CANDIDATE_SPACING_M = CLUSTER_RADIUS_M / 2
 AFC_FILENAME = "ntad_ev_alternative_fuel_corridors_round8_2025.geojson"
 PRIMARY_ROADS_FILENAME = "tl_2023_us_primaryroads.zip"
@@ -612,6 +612,74 @@ def _supplemental_demand_road_candidates(
     return candidates[columns].reset_index(drop=True)
 
 
+def _greedy_candidate_indices(
+    candidates: pd.DataFrame,
+    existing: np.ndarray,
+    order: np.ndarray,
+    target: int,
+    min_distance_m: float,
+) -> np.ndarray:
+    """Select a separated subset following one deterministic candidate order."""
+    coordinates = candidates[["lat", "lon"]].to_numpy(dtype=float)
+    available = _minimum_distances(coordinates, existing) >= min_distance_m
+    selected = []
+    for index in np.asarray(order, dtype=int):
+        if not available[index]:
+            continue
+        selected.append(int(index))
+        if len(selected) == target:
+            break
+        point = coordinates[index : index + 1]
+        available &= _minimum_distances(coordinates, point) >= min_distance_m
+    return np.asarray(selected, dtype=int)
+
+
+def _matched_count_candidate_indices(
+    candidates: pd.DataFrame,
+    existing: np.ndarray,
+    target: int,
+    min_distance_m: float,
+) -> np.ndarray:
+    """Find a matched-count separated set, preferring higher-population sites."""
+    if target <= 0 or candidates.empty:
+        return np.empty(0, dtype=int)
+
+    coordinates = candidates[["lat", "lon"]].to_numpy(dtype=float)
+    population = candidates["population"].to_numpy(dtype=float)
+    initial_distance = _minimum_distances(coordinates, existing)
+    n_candidates = len(candidates)
+    index = np.arange(n_candidates)
+    orders = [
+        np.lexsort((coordinates[:, 1], coordinates[:, 0], -population)),
+        np.lexsort((coordinates[:, 1], coordinates[:, 0], -initial_distance)),
+        np.lexsort((coordinates[:, 1], coordinates[:, 0])),
+        np.lexsort((-coordinates[:, 1], -coordinates[:, 0])),
+    ]
+
+    # Deterministic multistart avoids a dense high-population cluster blocking
+    # the matched node count. Weighted starts still favor populous tracts.
+    rng = np.random.default_rng(20231102)
+    population_weight = np.maximum(np.log1p(population), 1e-12)
+    for _ in range(32):
+        orders.append(rng.permutation(index))
+        orders.append(np.argsort(rng.exponential(1 / population_weight)))
+
+    best = np.empty(0, dtype=int)
+    best_population = -np.inf
+    for order in orders:
+        selected = _greedy_candidate_indices(
+            candidates, existing, order, target, min_distance_m
+        )
+        score = float(np.log1p(population[selected]).sum())
+        if len(selected) > len(best) or (
+            len(selected) == len(best) and score > best_population
+        ):
+            best, best_population = selected, score
+        if len(best) == target and order is orders[0]:
+            break
+    return best
+
+
 def _select_demand_sites(
     pop_units,
     primary_roads,
@@ -659,6 +727,14 @@ def _select_demand_sites(
         add_from(supplemental)
 
     candidates = pd.concat([primary, supplemental], ignore_index=True)
+    if len(selected) < target:
+        matched = _matched_count_candidate_indices(
+            candidates, existing, target, min_distance_m
+        )
+        selected = candidates.loc[matched, ["lat", "lon"]].to_numpy(dtype=float).tolist()
+        selected_snap_distances = (
+            candidates.loc[matched, "road_snap_distance_m"].to_numpy(dtype=float).tolist()
+        )
     if candidates.empty:
         eligible = 0
     else:

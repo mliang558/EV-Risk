@@ -6,6 +6,7 @@ from shapely.geometry import LineString, Polygon
 
 from analysis.attack_under_PO.counterfactual_batch1.densify_network import (
     _demand_road_candidates,
+    _matched_count_candidate_indices,
     _select_demand_sites,
 )
 
@@ -58,3 +59,22 @@ def test_selection_follows_population_order_and_adds_on_road_candidates():
     assert eligible >= 3
     assert len(sites) == 3
     assert sites[0, 1] < sites[1, 1]
+
+
+def test_matched_count_search_avoids_population_greedy_blocking():
+    import pandas as pd
+
+    candidates = pd.DataFrame(
+        {
+            "population": [1000, 10000, 1000],
+            "lat": [0.0, 0.0, 0.0],
+            "lon": [0.00, 0.09, 0.18],
+        }
+    )
+    selected = _matched_count_candidate_indices(
+        candidates,
+        existing=np.asarray([[20.0, 20.0]]),
+        target=2,
+        min_distance_m=15_000,
+    )
+    assert set(selected) == {0, 2}

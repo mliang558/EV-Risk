@@ -22,13 +22,22 @@ draw across the baseline and all intervention doses.
   then reapplies coverage correction, the county-customer cap, and the radius
   calculation.
 
+Outage epicenters are sampled uniformly within the selected county polygon and
+are shared across the baseline and every intervention scenario. Census-tract
+population affects Demand placement only; it does not affect outage locations.
+
 Run the input check, a two-simulation smoke test, and then the full experiment:
 
 ```bash
+python -u analysis/attack_under_PO/build_pop_units_epicenter.py \
+  --pop-csv analysis/attack_under_PO/counterfactual_batch1/inputs/tract_population_2020.csv.gz \
+  --out data/processed/tract_population_units_2020.gpkg
+
 python -u analysis/attack_under_PO/counterfactual_batch1/download_ev_afc.py
 python -u analysis/attack_under_PO/counterfactual_batch1/download_primary_roads.py
 
-python -u analysis/attack_under_PO/counterfactual_batch1/run_batch1_parallel.py --check-only
+python -u analysis/attack_under_PO/counterfactual_batch1/run_batch1_parallel.py \
+  --families baseline,Demand --epicenter-mode county_uniform --check-only
 
 python -u analysis/attack_under_PO/counterfactual_batch1/run_batch1_parallel.py \
   --only VT --n-sims 2 --workers 1 \
@@ -56,6 +65,9 @@ shared-random-number difference remains directly estimable:
 ```bash
 nohup python -u analysis/attack_under_PO/counterfactual_batch1/run_batch1_parallel.py \
   --families baseline,Demand \
+  --epicenter-mode county_uniform \
+  --population-units data/processed/tract_population_units_2020.gpkg \
+  --densify-cache outputs/1102-demand-expansion-2023-pop2020 \
   --out results_demand_1102_network2023_pooled2018_2023_n100 \
   --n-sims 100 --workers 45 --no-events \
   > results_review/logs/demand_1102.log 2>&1 &

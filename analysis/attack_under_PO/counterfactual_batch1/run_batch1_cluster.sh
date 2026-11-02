@@ -21,6 +21,7 @@ NETWORK_ROOT="${NETWORK_ROOT:-outputs/1029-network-data-preprocessing-10km-geode
 # Prefer absolute OUT so wipe path and run path never diverge
 OUT="${OUT:-$ROOT/results_interventions_1031_network2023_pooled2018_2023}"
 DENSIFY_CACHE="${DENSIFY_CACHE:-outputs/1031-network-expansion-comparators-2023}"
+POPULATION_UNITS="${POPULATION_UNITS:-data/processed/tract_population_units_2020.gpkg}"
 N_SIMS="${N_SIMS:-100}"
 # Prefer all visible CPUs; runner caps at n_units
 NPROC_ALL="$(nproc --all 2>/dev/null || nproc 2>/dev/null || echo 8)"
@@ -28,7 +29,7 @@ WORKERS="${WORKERS:-$NPROC_ALL}"
 # Baseline, two matched expansion strategies, and severity reduction.
 FAMILIES="${FAMILIES:-baseline,CF-D,Demand,CF-S}"
 ONLY="${ONLY:-}"
-EPICENTER_MODE="${EPICENTER_MODE:-population}"
+EPICENTER_MODE="${EPICENTER_MODE:-county_uniform}"
 # Full panel: skip per-event gz (huge I/O). Safe for §4.3:
 # metrics_*.csv still stores n_events, n_hit_events, P_hit, L_event,
 # E_loss_given_hit, total_rel_loss_x_duration, total_rel_loss_x_duration_hit.
@@ -50,6 +51,7 @@ echo "[CF-B1] threads OMP=$OMP_NUM_THREADS MKL=$MKL_NUM_THREADS OPENBLAS=$OPENBL
 ARGS=(
   --network-root "$NETWORK_ROOT"
   --densify-cache "$DENSIFY_CACHE"
+  --population-units "$POPULATION_UNITS"
   --out "$OUT"
   --n-sims "$N_SIMS"
   --workers "$WORKERS"

@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import datetime, timezone
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -41,6 +42,7 @@ from region_merge_config import ABBR_TO_STATE_NAME  # noqa: E402
 NETWORK_ROOT = ROOT / "outputs" / "1029-network-data-preprocessing-10km-geodesic-2018-2023"
 CACHE_ROOT = ROOT / "outputs" / "1031-network-expansion-comparators-2023"
 OUTPUT_ROOT = ROOT / "results_interventions_1031_network2023_pooled2018_2023"
+POPULATION_UNITS = ROOT / "data" / "processed" / "tract_population_units_2020.gpkg"
 
 
 def _absolute(path: Path) -> Path:
@@ -54,6 +56,14 @@ def _git_commit() -> str:
         ).strip()
     except Exception:
         return "unknown"
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _member_names(members: str) -> list[str]:
@@ -86,7 +96,13 @@ def _network_jobs(network_root: Path, year: int, selected: set[str]) -> list[dic
     return sorted(jobs, key=lambda job: (-job["n_nodes"], job["unit"]))
 
 
-def _preflight(jobs: list[dict], deep: bool, families: set[str]) -> dict:
+def _preflight(
+    jobs: list[dict],
+    deep: bool,
+    families: set[str],
+    epicenter_mode: str,
+    population_path: Path,
+) -> dict:
     from counterfactual_batch1.densify_network import (
         validate_ev_afc_file,
         validate_primary_roads_file,
@@ -101,16 +117,19 @@ def _preflight(jobs: list[dict], deep: bool, families: set[str]) -> dict:
         "coverage history": ROOT.parent / "24237376" / "coverage_history.csv",
     }
     missing = [f"{name}: {path}" for name, path in required.items() if not path.is_file()]
-    population = (
-        ROOT / "data" / "processed" / "pop_units_epicenter.gpkg",
-        ROOT / "data" / "processed" / "pop_units_epicenter.parquet",
-    )
-    if not any(path.is_file() for path in population):
-        missing.append("population epicenters: " + " or ".join(map(str, population)))
+    need_population = epicenter_mode == "population" or "Demand" in families
+    if need_population and not population_path.is_file():
+        missing.append(f"census-tract population: {population_path}")
     if missing:
         raise FileNotFoundError("Missing inputs:\n  " + "\n  ".join(missing))
 
     sources = {}
+    if population_path.is_file():
+        sources["population"] = {
+            "path": str(population_path.resolve()),
+            "sha256": _sha256(population_path),
+            "vintage": "2020 Decennial Census P1",
+        }
     if families & {"CF-D", "Demand"}:
         sources["afc"] = validate_ev_afc_file()
         afc = sources["afc"]
@@ -141,17 +160,22 @@ def _preflight(jobs: list[dict], deep: bool, families: set[str]) -> dict:
     )
     from monte_carlo_outage_attack import load_county_polygons
     from sample_lambda_from_posterior import load_posterior, prepare_outages_for_bootstrap
-    from select_epicenter_by_population import require_pop_units
-
     counties, posterior = load_posterior()
     if posterior.ndim != 2 or posterior.shape[1] != len(counties):
         raise ValueError("Posterior county dimension does not match the county-rate table")
     outages = prepare_outages_for_bootstrap(pd.read_csv(required["outage events"]))
     county_info = load_county_geometry_and_mcc(ROOT)
     coverage = load_coverage_history(ROOT)
-    population = require_pop_units(ROOT)
+    if need_population:
+        import geopandas as gpd
+
+        population = gpd.read_file(population_path)
+    else:
+        population = None
     polygons = load_county_polygons(ROOT)
-    tables = (outages, county_info, coverage, population, polygons)
+    tables = (outages, county_info, coverage, polygons)
+    if population is not None:
+        tables = (*tables, population)
     if any(table.empty for table in tables):
         raise ValueError("At least one required input table is empty")
 
@@ -204,22 +228,23 @@ def _preflight(jobs: list[dict], deep: bool, families: set[str]) -> dict:
     if missing_coverage:
         raise ValueError(f"Missing state-year coverage rows: {missing_coverage[:10]}")
 
-    pop_fips = set(
-        population.loc[population["population"] > 0, "county_fips"]
-        .astype(str)
-        .str.zfill(5)
-    )
-    population_fallbacks = len(target_fips - pop_fips)
-    if "Demand" in families and population_fallbacks:
+    missing_population: list[str] = []
+    if population is not None:
+        pop_fips = set(
+            population.loc[population["population"] > 0, "county_fips"]
+            .astype(str)
+            .str.zfill(5)
+        )
         missing_population = sorted(target_fips - pop_fips)
+    if need_population and missing_population:
         raise ValueError(
-            "Demand comparator requires positive-population tracts for every modeled "
+            "Positive-population tracts are required for every modeled "
             f"county; missing={missing_population[:10]}"
         )
     print(
         f"PASS: {len(jobs)} networks, {posterior.shape[0]} posterior draws, "
-        f"{posterior.shape[1]} counties, {len(outages)} events, and "
-        f"{population_fallbacks} county-polygon epicenter fallbacks"
+        f"{posterior.shape[1]} counties, {len(outages)} events, "
+        f"epicenter={epicenter_mode}, and complete required population coverage"
     )
     return sources
 
@@ -240,6 +265,7 @@ def _run_job(task: dict) -> str:
         force=task["force"],
         write_events=task["write_events"],
         epicenter_mode=task["epicenter_mode"],
+        population_units_path=task["population_units"],
     )
 
 
@@ -256,6 +282,7 @@ def main() -> None:
     parser.add_argument("--network-root", type=Path, default=NETWORK_ROOT)
     parser.add_argument("--network-year", type=int, default=2023)
     parser.add_argument("--densify-cache", type=Path, default=CACHE_ROOT)
+    parser.add_argument("--population-units", type=Path, default=POPULATION_UNITS)
     parser.add_argument("--out", type=Path, default=OUTPUT_ROOT)
     parser.add_argument("--n-sims", type=int, default=100)
     parser.add_argument("--workers", type=int, default=os.cpu_count() or 1)
@@ -267,8 +294,8 @@ def main() -> None:
     )
     parser.add_argument(
         "--epicenter-mode",
-        choices=("population", "station"),
-        default="population",
+        choices=("county_uniform", "population", "station"),
+        default="county_uniform",
     )
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--no-events", action="store_true")
@@ -277,8 +304,9 @@ def main() -> None:
 
     if args.n_sims < 1 or args.workers < 1:
         raise ValueError("--n-sims and --workers must be positive")
-    network_root, cache, out = map(
-        _absolute, (args.network_root, args.densify_cache, args.out)
+    network_root, cache, out, population_units = map(
+        _absolute,
+        (args.network_root, args.densify_cache, args.out, args.population_units),
     )
     selected = {x.strip() for x in args.only.split(",") if x.strip()}
     jobs = _network_jobs(network_root, args.network_year, selected)
@@ -295,7 +323,13 @@ def main() -> None:
     ]
     if not scenarios:
         raise ValueError(f"No scenarios matched --families={args.families!r}")
-    sources = _preflight(jobs, deep=args.check_only, families=requested_families)
+    sources = _preflight(
+        jobs,
+        deep=args.check_only,
+        families=requested_families,
+        epicenter_mode=args.epicenter_mode,
+        population_path=population_units,
+    )
     if args.check_only:
         return
 
@@ -312,6 +346,12 @@ def main() -> None:
         "state_rate_definition": "Lambda_s = sum_c lambda_c",
         "county_assignment": "county rate / state rate",
         "epicenter": args.epicenter_mode,
+        "epicenter_definition": (
+            "uniform random point within the selected county polygon; shared across "
+            "baseline and intervention scenarios"
+            if args.epicenter_mode == "county_uniform"
+            else args.epicenter_mode
+        ),
         "event_count": "Poisson draw from the summed county rates",
         "coverage_adjustment": (
             "state-year max_pct_covered; 2023 carries forward each state's 2022 value"
@@ -333,6 +373,7 @@ def main() -> None:
             "road inside its tract and follows the same 10 km separation rule"
         ),
         "demand_road_source": sources.get("primary_roads"),
+        "demand_population_source": sources.get("population"),
         "severity_intervention": "reduce affected customers, then recompute capped radius",
         "scenarios": [scenario.key for scenario in scenarios],
         "n_sims": args.n_sims,
@@ -351,6 +392,7 @@ def main() -> None:
             "write_events": not args.no_events,
             "scenarios": scenarios,
             "epicenter_mode": args.epicenter_mode,
+            "population_units": population_units,
         }
         for job in jobs
     ]

@@ -61,6 +61,31 @@ from counterfactual_batch1.densify_network import (
 from counterfactual_batch1.scenarios import Scenario
 
 
+def _load_population_units(project_root: Path, path: Path | None):
+    """Load an explicit Demand population file without changing epicenter inputs."""
+    if path is None:
+        return require_pop_units(project_root)
+    import geopandas as gpd
+
+    source = path if path.is_absolute() else project_root / path
+    if not source.is_file():
+        raise FileNotFoundError(source)
+    population = gpd.read_file(source)
+    if population.crs is None:
+        population = population.set_crs(4326)
+    else:
+        population = population.to_crs(4326)
+    if "county_fips" not in population:
+        if "tract_geoid" not in population:
+            raise ValueError(f"{source} lacks county_fips and tract_geoid")
+        population["county_fips"] = population["tract_geoid"].astype(str).str[:5]
+    population["county_fips"] = population["county_fips"].astype(str).str.zfill(5)
+    population["population"] = pd.to_numeric(
+        population["population"], errors="raise"
+    ).clip(lower=0)
+    return population
+
+
 def _duration_hours(row: pd.Series) -> float:
     if "duration_hours" in row and pd.notna(row.get("duration_hours")):
         duration = float(row["duration_hours"])
@@ -96,15 +121,14 @@ def draw_crn_events(
     G_for_epicenter: nx.Graph,
     bootstrap_pool: str = "all",
     outage_year: int | None = None,
-    epicenter_mode: str = "population",
+    epicenter_mode: str = "county_uniform",
     pop_gdf: Any = None,
 ) -> pd.DataFrame:
     """
     One CRN draw: λ → n_events → bootstrap → radius → epicenter.
 
-    Epicenter (lat, lon) frozen for all scenarios (CRN). Default population mode
-    uses census-tract population only (network-independent). CF densify nodes
-    never affect epicenter placement.
+    Epicenter (lat, lon) is drawn uniformly inside the selected county and frozen
+    for all scenarios (CRN). Expansion nodes never affect epicenter placement.
     """
     # The posterior draw is shared across analytical units for a joint national
     # realization. Count, event, and epicenter streams are unit-specific, while
@@ -189,10 +213,23 @@ def draw_crn_events(
     rng = np.random.default_rng(epicenter_seed)
     epic_lats: list[float] = []
     epic_lons: list[float] = []
-    mode = (epicenter_mode or "population").lower().strip()
+    mode = (epicenter_mode or "county_uniform").lower().strip()
+    valid_modes = {"county_uniform", "population", "station"}
+    if mode not in valid_modes:
+        raise ValueError(f"Unknown epicenter mode {mode!r}; expected {sorted(valid_modes)}")
     for _, row in boot_state.iterrows():
         fips_str = str(row["fips_str"]).zfill(5)
         poly = poly_dict.get(fips_str)
+
+        if mode == "county_uniform":
+            if poly is None:
+                epic_lats.append(np.nan)
+                epic_lons.append(np.nan)
+                continue
+            point = sample_point_in_polygon(poly, rng)
+            epic_lats.append(float(point.y))
+            epic_lons.append(float(point.x))
+            continue
 
         if mode == "station":
             station_epic = choose_station_epicenter_in_county(
@@ -587,7 +624,8 @@ def run_unit_batch1(
     outage_year: int | None = None,
     force: bool = False,
     write_events: bool = True,
-    epicenter_mode: str = "population",
+    epicenter_mode: str = "county_uniform",
+    population_units_path: Path | None = None,
 ) -> str:
     """
     Run all Batch-1 scenarios for one analysis unit with shared CRN draws.
@@ -633,10 +671,14 @@ def run_unit_batch1(
         else unit_geometry.unary_union
     )
     need_population = (
-        (epicenter_mode or "population").lower() == "population"
+        (epicenter_mode or "county_uniform").lower() == "population"
         or any(sc.family == "Demand" for sc in scenarios)
     )
-    pop_gdf = require_pop_units(project_root) if need_population else None
+    pop_gdf = (
+        _load_population_units(project_root, population_units_path)
+        if need_population
+        else None
+    )
     unit_pop = (
         pop_gdf[pop_gdf["county_fips"].astype(str).str.zfill(5).isin(target_fips)].copy()
         if pop_gdf is not None
@@ -647,8 +689,8 @@ def run_unit_batch1(
         demand_roads, demand_road_source = load_primary_roads_near(unit_boundary)
 
     # Preload / build graphs + cache E(G)
-    # Epicenters always drawn once per sim (population/KDE on G_base); densified
-    # graphs only for loss evaluation.
+    # Epicenters are drawn once per simulation and shared by every scenario;
+    # expanded graphs are used only for loss evaluation.
     graph_cache: dict[str, tuple[nx.Graph, float, float, dict]] = {}
     scenario_variants: dict[str, str] = {}
     original_nodes = frozenset(G_base.nodes)

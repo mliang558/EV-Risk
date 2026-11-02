@@ -25,8 +25,12 @@ def main() -> None:
     manifest = json.loads((root / "batch_manifest.json").read_text(encoding="utf-8"))
     if manifest.get("scenarios") != SCENARIOS:
         raise ValueError(f"Unexpected scenarios: {manifest.get('scenarios')}")
+    if manifest.get("epicenter") != "county_uniform":
+        raise ValueError("Demand run must use county-uniform outage epicenters")
     if not manifest.get("demand_road_source", {}).get("sha256"):
         raise ValueError("Manifest does not record the Demand road source")
+    if not manifest.get("demand_population_source", {}).get("sha256"):
+        raise ValueError("Manifest does not record the 2020 tract-population source")
 
     unit_dirs = sorted(path.parent for path in root.glob("*/summary.csv"))
     if len(unit_dirs) != args.expected_units:
@@ -77,7 +81,7 @@ def main() -> None:
     print(
         f"PASS: Demand comparator has {len(unit_dirs)} units, {args.expected_sims} "
         "replications, matched node counts, official road provenance, valid losses, "
-        "and 10 km spacing"
+        "county-uniform outage epicenters, complete population provenance, and 10 km spacing"
     )
 
 

@@ -278,6 +278,10 @@ def main() -> None:
     if not out_path.is_absolute():
         out_path = ROOT / out_path
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    # Fiona cannot infer a schema from pandas' nullable StringDtype.
+    for column in ("tract_geoid", "county_fips"):
+        out[column] = out[column].astype(str).astype(object)
+    out["population"] = pd.to_numeric(out["population"], errors="raise").astype(float)
     if out_path.suffix.lower() == ".gpkg":
         out.to_file(out_path, driver="GPKG")
     else:

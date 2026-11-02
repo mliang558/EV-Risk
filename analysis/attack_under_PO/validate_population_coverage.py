@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import argparse
 
 import pandas as pd
 
@@ -19,11 +20,29 @@ def fips5(values: pd.Series) -> pd.Series:
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--population-path",
+        type=Path,
+        help="Validate a candidate GPKG/Parquet before replacing the active cache",
+    )
+    args = parser.parse_args()
+
     county_path = ROOT / "advi_results_2018_2023" / "county_estimates_advi.csv"
     counties = pd.read_csv(county_path)
     required = set(fips5(counties["fips"]))
 
-    population = require_pop_units(ROOT).copy()
+    if args.population_path:
+        import geopandas as gpd
+
+        candidate = args.population_path.absolute()
+        if not candidate.is_file():
+            raise FileNotFoundError(candidate)
+        population = gpd.read_file(candidate)
+        if population is None or population.empty:
+            raise ValueError(f"No population rows in {candidate}")
+    else:
+        population = require_pop_units(ROOT).copy()
     population["county_fips"] = fips5(population["county_fips"])
     population["population"] = pd.to_numeric(population["population"], errors="coerce")
     present = set(population.loc[population["population"].gt(0), "county_fips"])

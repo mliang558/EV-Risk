@@ -86,8 +86,11 @@ def _network_jobs(network_root: Path, year: int, selected: set[str]) -> list[dic
     return sorted(jobs, key=lambda job: (-job["n_nodes"], job["unit"]))
 
 
-def _preflight(jobs: list[dict], deep: bool) -> dict:
-    from counterfactual_batch1.densify_network import validate_ev_afc_file
+def _preflight(jobs: list[dict], deep: bool, families: set[str]) -> dict:
+    from counterfactual_batch1.densify_network import (
+        validate_ev_afc_file,
+        validate_primary_roads_file,
+    )
     from monte_carlo_outage_attack import load_network
 
     required = {
@@ -107,11 +110,18 @@ def _preflight(jobs: list[dict], deep: bool) -> dict:
     if missing:
         raise FileNotFoundError("Missing inputs:\n  " + "\n  ".join(missing))
 
-    afc = validate_ev_afc_file()
-    print(
-        f"OK: official EV AFC corridors: {afc['n_segments']} segments, "
-        f"statuses={afc['statuses']}\n    {afc['path']}"
-    )
+    sources = {}
+    if families & {"CF-D", "Demand"}:
+        sources["afc"] = validate_ev_afc_file()
+        afc = sources["afc"]
+        print(
+            f"OK: official EV AFC corridors: {afc['n_segments']} segments, "
+            f"statuses={afc['statuses']}\n    {afc['path']}"
+        )
+    if "Demand" in families:
+        sources["primary_roads"] = validate_primary_roads_file()
+        roads = sources["primary_roads"]
+        print(f"OK: Census primary roads ({roads['vintage']}): {roads['path']}")
     errors = []
     for job in jobs:
         graph = load_network(job["pkl_path"])
@@ -123,7 +133,7 @@ def _preflight(jobs: list[dict], deep: bool) -> dict:
         raise ValueError("Invalid networks:\n  " + "\n  ".join(errors))
 
     if not deep:
-        return afc
+        return sources
     from compute_impact_radius import (
         STATE_NAME_TO_ABBR,
         load_county_geometry_and_mcc,
@@ -194,14 +204,24 @@ def _preflight(jobs: list[dict], deep: bool) -> dict:
     if missing_coverage:
         raise ValueError(f"Missing state-year coverage rows: {missing_coverage[:10]}")
 
-    pop_fips = set(population["county_fips"].astype(str).str.zfill(5))
+    pop_fips = set(
+        population.loc[population["population"] > 0, "county_fips"]
+        .astype(str)
+        .str.zfill(5)
+    )
     population_fallbacks = len(target_fips - pop_fips)
+    if "Demand" in families and population_fallbacks:
+        missing_population = sorted(target_fips - pop_fips)
+        raise ValueError(
+            "Demand comparator requires positive-population tracts for every modeled "
+            f"county; missing={missing_population[:10]}"
+        )
     print(
         f"PASS: {len(jobs)} networks, {posterior.shape[0]} posterior draws, "
         f"{posterior.shape[1]} counties, {len(outages)} events, and "
         f"{population_fallbacks} county-polygon epicenter fallbacks"
     )
-    return afc
+    return sources
 
 
 def _run_job(task: dict) -> str:
@@ -265,13 +285,6 @@ def main() -> None:
     expected = len(selected) if selected else 45
     if not jobs or (not selected and len(jobs) != expected):
         raise ValueError(f"Expected {expected} analytical units, found {len(jobs)}")
-    afc = _preflight(jobs, deep=args.check_only)
-    if args.check_only:
-        return
-
-    out.mkdir(parents=True, exist_ok=True)
-    cache.mkdir(parents=True, exist_ok=True)
-    workers = min(args.workers, len(jobs))
     requested_families = {
         family.strip() for family in args.families.split(",") if family.strip()
     }
@@ -282,6 +295,13 @@ def main() -> None:
     ]
     if not scenarios:
         raise ValueError(f"No scenarios matched --families={args.families!r}")
+    sources = _preflight(jobs, deep=args.check_only, families=requested_families)
+    if args.check_only:
+        return
+
+    out.mkdir(parents=True, exist_ok=True)
+    cache.mkdir(parents=True, exist_ok=True)
+    workers = min(args.workers, len(jobs))
     manifest = {
         "created_utc": datetime.now(timezone.utc).isoformat(),
         "git_commit": _git_commit(),
@@ -306,11 +326,13 @@ def main() -> None:
             "FHWA-designated EV Alternative Fuel Corridor candidates sampled every "
             "50 miles and kept at least 10 km from all existing and added hypernodes"
         ),
-        "corridor_source": afc,
+        "corridor_source": sources.get("afc"),
         "demand_comparator": (
             "add exactly the corridor scenario's realized number of nodes, prioritizing "
-            "high-population census tracts with the same 10 km separation rule"
+            "high-population census tracts; each candidate lies on a Census primary "
+            "road inside its tract and follows the same 10 km separation rule"
         ),
+        "demand_road_source": sources.get("primary_roads"),
         "severity_intervention": "reduce affected customers, then recompute capped radius",
         "scenarios": [scenario.key for scenario in scenarios],
         "n_sims": args.n_sims,

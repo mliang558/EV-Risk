@@ -54,6 +54,7 @@ from select_epicenter_by_population import (
 )
 
 from counterfactual_batch1.densify_network import (
+    load_primary_roads_near,
     load_or_build_demand,
     load_or_build_densified,
 )
@@ -515,6 +516,8 @@ def resolve_graph_for_scenario(
     densify_cache: Path,
     unit_boundary,
     pop_units=None,
+    demand_roads=None,
+    demand_road_source: dict | None = None,
     matched_target: int | None = None,
 ) -> tuple[nx.Graph, str, dict]:
     """Return the baseline or one of the cached expanded graphs."""
@@ -523,6 +526,8 @@ def resolve_graph_for_scenario(
     if scenario.demand_pct is not None:
         if pop_units is None:
             raise ValueError("Demand expansion requires census-tract population units")
+        if demand_roads is None or demand_road_source is None:
+            raise ValueError("Demand expansion requires Census primary roads")
         if matched_target is None:
             _, corridor_meta = load_or_build_densified(
                 G_base,
@@ -538,6 +543,8 @@ def resolve_graph_for_scenario(
             scenario.demand_pct,
             matched_target,
             pop_units,
+            demand_roads,
+            demand_road_source,
             densify_cache,
         )
         return graph, scenario.network_variant, meta
@@ -635,6 +642,9 @@ def run_unit_batch1(
         if pop_gdf is not None
         else None
     )
+    demand_roads = demand_road_source = None
+    if any(sc.family == "Demand" and sc.demand_pct is not None for sc in scenarios):
+        demand_roads, demand_road_source = load_primary_roads_near(unit_boundary)
 
     # Preload / build graphs + cache E(G)
     # Epicenters always drawn once per sim (population/KDE on G_base); densified
@@ -652,6 +662,8 @@ def run_unit_batch1(
             densify_cache=densify_cache,
             unit_boundary=unit_boundary,
             pop_units=unit_pop,
+            demand_roads=demand_roads,
+            demand_road_source=demand_road_source,
             matched_target=matched_target,
         )
         if sc.family == "CF-D":
@@ -870,12 +882,16 @@ def run_unit_batch1(
                     "realized_pct",
                     "n_candidates",
                     "n_candidates_eligible",
+                    "n_population_tracts",
                     "spacing_m",
                     "cluster_radius_m",
                     "min_distance_to_existing_m",
                     "min_distance_between_added_m",
                     "corridor_source",
                     "corridor_source_sha256",
+                    "road_snap_distance_median",
+                    "road_snap_distance_max_m",
+                    "road_source",
                 )
                 if k in meta or k in ("n_nevi", "n_target", "n_added", "n_shortfall")
             }

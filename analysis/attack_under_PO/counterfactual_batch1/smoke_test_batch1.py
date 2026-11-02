@@ -149,9 +149,15 @@ def _check_corridor_metadata(unit_dir: Path, checks: Checks) -> None:
             f"{demand_key}: node count exactly matches the corridor scenario",
         )
         checks.check(
-            demand.get("mode") == "population_demand_matched"
+            demand.get("mode") == "population_primary_road_matched"
             and int(demand.get("n_candidates_eligible", 0)) >= added,
-            f"{demand_key}: population-targeted placement is recorded",
+            f"{demand_key}: population-targeted road placement is recorded",
+        )
+        checks.check(
+            demand.get("road_source", {}).get("layer")
+            == "TIGER/Line Primary Roads"
+            and demand.get("road_source", {}).get("sha256"),
+            f"{demand_key}: official road source is recorded",
         )
         demand_distances = [
             demand.get("min_distance_to_existing_m"),

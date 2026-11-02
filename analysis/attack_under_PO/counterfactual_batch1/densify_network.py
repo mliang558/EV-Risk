@@ -1,4 +1,4 @@
-"""Add eligible Interstate-corridor hypernodes and rebuild the network."""
+"""Build corridor- and population-targeted expansion networks."""
 
 from __future__ import annotations
 
@@ -37,8 +37,13 @@ from analysis.build_charging_network_step2 import (
 CLUSTER_RADIUS_M = 10_000.0
 CORRIDOR_SPACING_M = 50 * 1609.344
 CACHE_SCHEMA = "fhwa_ev_afc_50mi_10km_unit_boundary_v4"
-DEMAND_CACHE_SCHEMA = "population_tract_matched_count_10km_v1"
+DEMAND_CACHE_SCHEMA = "population_primary_road_matched_count_10km_v2"
 AFC_FILENAME = "ntad_ev_alternative_fuel_corridors_round8_2025.geojson"
+PRIMARY_ROADS_FILENAME = "tl_2023_us_primaryroads.zip"
+PRIMARY_ROADS_URL = (
+    "https://www2.census.gov/geo/tiger/TIGER2023/PRIMARYROADS/"
+    + PRIMARY_ROADS_FILENAME
+)
 
 
 def _node_coords(graph: nx.Graph) -> tuple[np.ndarray, list]:
@@ -74,8 +79,17 @@ def _boundary_signature(boundary) -> str:
     return hashlib.sha256(boundary.wkb).hexdigest()
 
 
+@lru_cache(maxsize=8)
+def _file_signature_text(path_text: str) -> str:
+    digest = hashlib.sha256()
+    with Path(path_text).open("rb") as file:
+        for chunk in iter(lambda: file.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def _file_signature(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+    return _file_signature_text(str(path.absolute()))
 
 
 def _rebuild_edges(graph: nx.Graph) -> nx.Graph:
@@ -153,6 +167,60 @@ def validate_ev_afc_file() -> dict:
         "n_segments": int(len(roads)),
         "statuses": sorted(roads[columns["ELECTRICVE"]].dropna().astype(str).unique()),
     }
+
+
+def resolve_primary_roads_file() -> Path:
+    """Return the pinned national Census TIGER/Line primary-roads archive."""
+    configured = os.environ.get("TIGER_PRIMARY_ROADS_PATH", "").strip()
+    path = Path(configured) if configured else ROOT / "data" / "raw" / PRIMARY_ROADS_FILENAME
+    path = path if path.is_absolute() else ROOT / path
+    if not path.is_file():
+        raise FileNotFoundError(
+            f"Census primary-roads file not found: {path}. Run "
+            "download_primary_roads.py before the Demand experiment."
+        )
+    return path
+
+
+def _vector_source(path: Path) -> str:
+    return f"zip://{path.absolute().as_posix()}" if path.suffix.lower() == ".zip" else str(path)
+
+
+def validate_primary_roads_file() -> dict:
+    """Validate the official road source without loading the full national layer."""
+    import geopandas as gpd
+
+    path = resolve_primary_roads_file()
+    roads = gpd.read_file(_vector_source(path), rows=20)
+    if roads.empty:
+        raise ValueError(f"No road segments found in {path}")
+    if not roads.geometry.geom_type.isin(["LineString", "MultiLineString"]).all():
+        raise ValueError("Census primary-roads file contains non-line geometry")
+    return {
+        "path": str(path.absolute()),
+        "url": PRIMARY_ROADS_URL,
+        "sha256": _file_signature(path),
+        "vintage": 2023,
+        "layer": "TIGER/Line Primary Roads",
+    }
+
+
+def load_primary_roads_near(boundary):
+    """Read and clip national primary roads to one analytical unit."""
+    import geopandas as gpd
+
+    if boundary is None or boundary.is_empty:
+        raise ValueError("Demand placement requires a non-empty analytical-unit boundary")
+    source = validate_primary_roads_file()
+    roads = gpd.read_file(_vector_source(Path(source["path"])), bbox=boundary.bounds)
+    roads = roads.set_crs(4326) if roads.crs is None else roads.to_crs(4326)
+    roads = roads[roads.geometry.geom_type.isin(["LineString", "MultiLineString"])].copy()
+    roads = roads[roads.intersects(boundary)].copy()
+    roads["geometry"] = roads.geometry.intersection(boundary)
+    roads = roads[~roads.geometry.is_empty].copy()
+    if roads.empty:
+        raise ValueError("No Census primary-road segments intersect this analytical unit")
+    return roads, source
 
 
 def _ev_corridors_near(graph: nx.Graph, boundary=None):
@@ -388,36 +456,91 @@ def load_or_build_densified(
 
 
 def _population_signature(pop_units) -> str:
-    """Hash the population candidates used to construct a demand network."""
-    rows = []
-    for _, row in pop_units.sort_values("county_fips").iterrows():
-        point = row.geometry.representative_point()
-        rows.append(
-            f"{str(row['county_fips']).zfill(5)}|{float(row['population']):.6f}|"
-            f"{point.y:.10f}|{point.x:.10f}"
+    """Hash population values and complete tract geometry."""
+    digest = hashlib.sha256()
+    sort_columns = [column for column in ("county_fips", "tract_geoid") if column in pop_units]
+    ordered = pop_units.sort_values(sort_columns) if sort_columns else pop_units
+    for index, row in ordered.iterrows():
+        tract = str(row.get("tract_geoid", index))
+        county = str(row.get("county_fips", "")).zfill(5)
+        digest.update(f"{county}|{tract}|{float(row['population']):.6f}|".encode())
+        digest.update(row.geometry.wkb)
+    return digest.hexdigest()
+
+
+def _demand_road_candidates(pop_units, primary_roads) -> pd.DataFrame:
+    """Place one candidate per populated tract on a primary road inside it."""
+    from shapely.ops import nearest_points, unary_union
+
+    columns = ["population", "tract_geoid", "lat", "lon", "road_snap_distance_m"]
+    if pop_units.empty or primary_roads.empty:
+        return pd.DataFrame(columns=columns)
+
+    tracts = pop_units.to_crs(4326).copy()
+    roads = primary_roads.to_crs(4326).copy()
+    road_index = roads.sindex
+
+    records = []
+    candidate_points = []
+    for index, row in tracts.iterrows():
+        population = float(row["population"])
+        tract = row.geometry
+        if population <= 0 or tract is None or tract.is_empty:
+            continue
+        matches = list(road_index.query(tract, predicate="intersects"))
+        if not matches:
+            continue
+        pieces = [
+            geometry.intersection(tract)
+            for geometry in roads.geometry.iloc[matches]
+            if geometry is not None and not geometry.is_empty
+        ]
+        pieces = [geometry for geometry in pieces if not geometry.is_empty and geometry.length > 0]
+        if not pieces:
+            continue
+        roads_inside = unary_union(pieces)
+        origin = tract.representative_point()
+        road_point = nearest_points(origin, roads_inside)[1]
+        candidate_points.append(road_point)
+        _, _, snap_distance = WGS84_GEOD.inv(
+            origin.x, origin.y, road_point.x, road_point.y
         )
-    return hashlib.sha256("\n".join(sorted(rows)).encode("utf-8")).hexdigest()
+        records.append(
+            {
+                "population": population,
+                "tract_geoid": str(row.get("tract_geoid", index)),
+                "road_snap_distance_m": float(snap_distance),
+            }
+        )
+
+    if not records:
+        return pd.DataFrame(columns=columns)
+    for record, point in zip(records, candidate_points):
+        record.update(lat=float(point.y), lon=float(point.x))
+    return pd.DataFrame(records).sort_values(
+        ["population", "tract_geoid", "lat", "lon"],
+        ascending=[False, True, True, True],
+    ).reset_index(drop=True)
 
 
 def _select_demand_sites(
     pop_units,
+    primary_roads,
     existing: np.ndarray,
     target: int,
     min_distance_m: float,
-) -> tuple[np.ndarray, int]:
-    """Select high-population tract representatives subject to node spacing."""
+) -> tuple[np.ndarray, int, pd.DataFrame, np.ndarray]:
+    """Select population-ranked road candidates subject to node spacing."""
     if target <= 0 or pop_units.empty:
-        return np.empty((0, 2)), 0
-    candidates = []
-    for _, row in pop_units.iterrows():
-        point = row.geometry.representative_point()
-        candidates.append((float(row["population"]), float(point.y), float(point.x)))
-    candidates.sort(key=lambda item: (-item[0], item[1], item[2]))
+        return np.empty((0, 2)), 0, pd.DataFrame(), np.empty(0)
+    candidates = _demand_road_candidates(pop_units, primary_roads)
 
     selected = []
+    selected_snap_distances = []
     occupied = existing.copy()
     eligible = 0
-    for _, lat, lon in candidates:
+    for row in candidates.itertuples(index=False):
+        lat, lon = float(row.lat), float(row.lon)
         point = np.asarray([[lat, lon]], dtype=float)
         if _minimum_distances(point, existing)[0] < min_distance_m:
             continue
@@ -425,25 +548,34 @@ def _select_demand_sites(
         if _minimum_distances(point, occupied)[0] < min_distance_m:
             continue
         selected.append(point[0])
+        selected_snap_distances.append(float(row.road_snap_distance_m))
         occupied = np.vstack((occupied, point))
         if len(selected) == target:
             break
     sites = np.asarray(selected) if selected else np.empty((0, 2))
-    return sites, eligible
+    return sites, eligible, candidates, np.asarray(selected_snap_distances)
 
 
 def build_demand_network(
     graph: nx.Graph,
     target: int,
     pop_units,
+    primary_roads,
+    road_source: dict,
     *,
     cluster_radius_m: float = CLUSTER_RADIUS_M,
 ) -> tuple[nx.Graph, dict]:
-    """Add a matched number of nodes near the most populated census tracts."""
+    """Add a matched number of nodes on roads in the most populated tracts."""
     existing, _ = _node_coords(graph)
-    sites, eligible_count = _select_demand_sites(
-        pop_units, existing, int(target), cluster_radius_m
+    sites, eligible_count, candidates, snap_distances = _select_demand_sites(
+        pop_units, primary_roads, existing, int(target), cluster_radius_m
     )
+    if len(sites) != int(target):
+        raise ValueError(
+            "Demand comparator cannot match the corridor expansion: "
+            f"target={int(target)}, selected={len(sites)}, "
+            f"road_candidates={len(candidates)}, spacing_eligible={eligible_count}"
+        )
     expanded = graph.copy()
     for index, (lat, lon) in enumerate(sites):
         expanded.add_node(
@@ -453,7 +585,7 @@ def build_demand_network(
             location=(float(lat), float(lon)),
             n_stations=1,
             is_cf_added=True,
-            placement_mode="population_demand",
+            placement_mode="population_primary_road",
         )
     expanded = _rebuild_edges(expanded) if len(sites) else expanded
     added = len(sites)
@@ -469,19 +601,27 @@ def build_demand_network(
         np.fill_diagonal(distances, np.inf)
         min_added = float(distances.min())
     return expanded, {
-        "mode": "population_demand_matched",
+        "mode": "population_primary_road_matched",
         "n_base": len(existing),
         "n_target": int(target),
         "n_added": added,
         "n_shortfall": int(target) - added,
         "realized_pct": added / len(existing) if len(existing) else 0.0,
-        "n_candidates": int(len(pop_units)),
+        "n_population_tracts": int(len(pop_units)),
+        "n_candidates": int(len(candidates)),
         "n_candidates_eligible": int(eligible_count),
         "cluster_radius_m": float(cluster_radius_m),
         "min_distance_to_existing_m": (
             float(_minimum_distances(sites, existing).min()) if added else None
         ),
         "min_distance_between_added_m": min_added,
+        "road_snap_distance_median": (
+            float(np.median(snap_distances)) if len(snap_distances) else None
+        ),
+        "road_snap_distance_max_m": (
+            float(np.max(snap_distances)) if len(snap_distances) else None
+        ),
+        "road_source": road_source,
         "population_source_signature": _population_signature(pop_units),
     }
 
@@ -492,6 +632,8 @@ def load_or_build_demand(
     pct: float,
     target: int,
     pop_units,
+    primary_roads,
+    road_source: dict,
     cache_root: Path,
     *,
     cluster_radius_m: float = CLUSTER_RADIUS_M,
@@ -507,6 +649,7 @@ def load_or_build_demand(
     )
     signature = _graph_signature(graph)
     pop_signature = _population_signature(pop_units)
+    road_signature = str(road_source["sha256"])
     if path.is_file() and not force:
         with path.open("rb") as file:
             payload = pickle.load(file)
@@ -515,6 +658,7 @@ def load_or_build_demand(
             meta.get("cache_schema") == DEMAND_CACHE_SCHEMA
             and meta.get("base_graph_signature") == signature
             and meta.get("population_source_signature") == pop_signature
+            and meta.get("road_source", {}).get("sha256") == road_signature
             and int(meta.get("n_target", -1)) == int(target)
             and meta.get("cluster_radius_m") == float(cluster_radius_m)
         )
@@ -523,7 +667,12 @@ def load_or_build_demand(
         print(f"[cache-rebuild] incompatible cache: {path}", flush=True)
 
     expanded, meta = build_demand_network(
-        graph, target, pop_units, cluster_radius_m=cluster_radius_m
+        graph,
+        target,
+        pop_units,
+        primary_roads,
+        road_source,
+        cluster_radius_m=cluster_radius_m,
     )
     meta.update(cache_schema=DEMAND_CACHE_SCHEMA, base_graph_signature=signature)
     path.parent.mkdir(parents=True, exist_ok=True)

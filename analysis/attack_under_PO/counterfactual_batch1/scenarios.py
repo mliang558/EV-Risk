@@ -55,7 +55,7 @@ def batch1_scenarios() -> list[Scenario]:
                     "No demand-targeted expansion"
                     if pct == 0
                     else "Add the same number of nodes as the corridor scenario, "
-                    "prioritizing high-population census tracts"
+                    "prioritizing primary-road sites in high-population census tracts"
                 ),
             )
         )

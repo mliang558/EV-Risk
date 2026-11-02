@@ -262,6 +262,9 @@ positions. Rankings based on mean per-event loss, \Levent{{}}, were positively
 associated with the primary ranking (Spearman $\rho={rho:.2f}$), while rank
 differences indicate that annual cumulative exposure and event-level structural
 sensitivity capture related but distinct dimensions of outage vulnerability.
+Because \Lcum{{}} combines outage exposure with network response, the spatial
+pattern alone does not identify its underlying mechanism. Associations with
+outage and network characteristics are examined in Section~\ref{{sec:driver}}.
 """
     path.write_text(text, encoding="utf-8")
 

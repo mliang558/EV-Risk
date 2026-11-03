@@ -387,6 +387,7 @@ def run_unit_batch2(
     if not np.isfinite(E0) or E0 <= 0:
         raise ValueError(f"Invalid baseline efficiency for {unit}: {E0}")
     graph_id = f"net{year_network}:{unit}"
+    reference_nodes = frozenset(G.nodes)
 
     event_mode = str(event_mode).strip().lower()
     if event_mode not in {"lambda_bootstrap", "replay"}:
@@ -512,6 +513,10 @@ def run_unit_batch2(
             kw["removal_cache"] = removal_cache
         if "graph_id" in sig.parameters:
             kw["graph_id"] = graph_id
+        if "reference_nodes" in sig.parameters:
+            kw["reference_nodes"] = reference_nodes
+        if "reference_efficiency_before" in sig.parameters:
+            kw["reference_efficiency_before"] = E0
         ev = evaluate_events_on_graph(**kw)
         if event_mode == "replay" and len(ev) != len(events):
             raise AssertionError(

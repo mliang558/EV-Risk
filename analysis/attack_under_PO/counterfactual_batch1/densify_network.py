@@ -37,8 +37,8 @@ from analysis.build_charging_network_step2 import (
 CLUSTER_RADIUS_M = 10_000.0
 CORRIDOR_SPACING_M = 50 * 1609.344
 CACHE_SCHEMA = "fhwa_ev_afc_50mi_10km_unit_boundary_v4"
-DEMAND_CACHE_SCHEMA = "population_primary_road_matched_count_10km_v6"
-DEMAND_CANDIDATE_SPACING_M = CLUSTER_RADIUS_M / 2
+DEMAND_CACHE_SCHEMA = "population_primary_road_matched_count_10km_v7"
+DEMAND_CANDIDATE_SPACING_M = CLUSTER_RADIUS_M / 10
 AFC_FILENAME = "ntad_ev_alternative_fuel_corridors_round8_2025.geojson"
 PRIMARY_ROADS_FILENAME = "tl_2023_us_primaryroads.zip"
 PRIMARY_ROADS_URL = (
@@ -682,7 +682,7 @@ def _matched_count_candidate_indices(
     exact = _exact_matched_count_candidate_indices(
         candidates, existing, target, min_distance_m
     )
-    return exact if len(exact) == target else best
+    return exact if len(exact) > len(best) else best
 
 
 def _exact_matched_count_candidate_indices(
@@ -810,7 +810,7 @@ def _select_demand_sites(
     supplemental = pd.DataFrame(columns=primary.columns)
     if len(selected) < target:
         supplemental = _supplemental_demand_road_candidates(
-            pop_units, primary_roads, spacing_m=min_distance_m / 2
+            pop_units, primary_roads, spacing_m=min_distance_m / 10
         )
         if not supplemental.empty and not primary.empty:
             primary_keys = set(zip(primary["lat"].round(8), primary["lon"].round(8)))
@@ -894,7 +894,7 @@ def build_demand_network(
         "n_population_tracts": int(len(pop_units)),
         "n_candidates": int(len(candidates)),
         "n_candidates_eligible": int(eligible_count),
-        "candidate_spacing_m": float(cluster_radius_m / 2),
+        "candidate_spacing_m": float(cluster_radius_m / 10),
         "cluster_radius_m": float(cluster_radius_m),
         "min_distance_to_existing_m": (
             float(_minimum_distances(sites, existing).min()) if added else None

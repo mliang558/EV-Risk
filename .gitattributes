@@ -12,3 +12,4 @@ analysis/attack_under_PO/counterfactual_batch1/build_cf_d_networks.py -text whit
 analysis/attack_under_PO/counterfactual_batch1/densify_network.py -text whitespace=cr-at-eol
 analysis/attack_under_PO/counterfactual_batch1/scenarios.py -text whitespace=cr-at-eol
 analysis/attack_under_PO/build_pop_units_epicenter.py -text whitespace=cr-at-eol
+analysis/attack_under_PO/batch2_yearly/engine.py -text whitespace=cr-at-eol

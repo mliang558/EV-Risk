@@ -182,6 +182,7 @@ def _worker(args: tuple) -> str:
         write_events,
         share_as_B2023,
         event_mode,
+        epicenter_mode,
     ) = args
 
     # Worker processes must use the same checkout selected by the parent.
@@ -211,6 +212,7 @@ def _worker(args: tuple) -> str:
         force=bool(force),
         write_events=bool(write_events),
         event_mode=str(event_mode),
+        epicenter_mode=str(epicenter_mode),
     )
 
     if share_as_B2023:
@@ -321,6 +323,12 @@ def main() -> None:
         ),
     )
     ap.add_argument(
+        "--epicenter-mode",
+        choices=("county_uniform", "population"),
+        default="population",
+        help="How to sample an epicenter inside each observed event county.",
+    )
+    ap.add_argument(
         "--write-events",
         action="store_true",
         help="Write large per-simulation event files (off by default).",
@@ -380,6 +388,7 @@ def main() -> None:
     print(f"  experiments : {', '.join(args.families)}", flush=True)
     print(f"  years       : {', '.join(map(str, args.years))}", flush=True)
     print(f"  event mode  : {args.event_mode}", flush=True)
+    print(f"  epicenters  : {args.epicenter_mode}", flush=True)
     print(f"  simulations : {args.n_sims}", flush=True)
     print(f"  workers     : {workers}", flush=True)
     print(f"  project     : {ROOT}", flush=True)
@@ -395,6 +404,12 @@ def main() -> None:
                 "n_sims": args.n_sims,
                 "n_jobs": len(jobs),
                 "event_mode": args.event_mode,
+                "epicenter_mode": args.epicenter_mode,
+                "epicenter_definition": (
+                    "uniform random point within the observed county polygon"
+                    if args.epicenter_mode == "county_uniform"
+                    else "census-tract population-weighted point within the observed county"
+                ),
                 "project_root": str(ROOT),
                 "network_root": str(network_root.absolute()),
                 "network_root_resolved": str(network_root.resolve()),
@@ -429,6 +444,7 @@ def main() -> None:
             write_events,
             j.get("share_as_B2023", False),
             args.event_mode,
+            args.epicenter_mode,
         )
         for j in jobs
     ]

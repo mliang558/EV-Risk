@@ -19,6 +19,7 @@ OUT="${OUT:-$ROOT/results_canonical_${RUN_DATE}_2023_pooled_sumlambda_n${N_SIMS}
 VISIBLE_CPUS="$(nproc 2>/dev/null || echo 8)"
 WORKERS="${WORKERS:-$VISIBLE_CPUS}"
 ONLY="${ONLY:-}"
+EPICENTER_MODE="${EPICENTER_MODE:-population}"
 
 check_inputs() {
   python analysis/attack_under_PO/canonical/validate_inputs.py \
@@ -34,7 +35,7 @@ run_attack() {
     --n-sims "$N_SIMS"
     --workers "$WORKERS"
     --families baseline
-    --epicenter-mode population
+    --epicenter-mode "$EPICENTER_MODE"
     --no-events
   )
   if [[ -n "$ONLY" ]]; then
@@ -48,7 +49,8 @@ run_attack() {
 
 validate_outputs() {
   python analysis/attack_under_PO/canonical/validate_outputs.py \
-    --out "$OUT" --expected-sims "$N_SIMS"
+    --out "$OUT" --expected-sims "$N_SIMS" \
+    --expected-epicenter-mode "$EPICENTER_MODE"
 }
 
 case "$MODE" in

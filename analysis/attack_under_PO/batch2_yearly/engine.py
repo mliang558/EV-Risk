@@ -92,9 +92,10 @@ def _add_radii_and_epicenters(
     cov_df: pd.DataFrame,
     poly_dict: dict,
     pop_gdf: Any,
+    epicenter_mode: str,
     strict: bool,
 ) -> pd.DataFrame:
-    """Add deterministic radii and population-weighted within-county epicenters."""
+    """Add radii and deterministic within-county epicenters."""
     if events.empty:
         return pd.DataFrame()
 
@@ -121,14 +122,21 @@ def _add_radii_and_epicenters(
         bad = sorted(out.loc[invalid_radius, "fips_str"].astype(str).unique())
         raise ValueError(f"Invalid replay radius inputs for counties={bad[:10]}")
 
+    mode = str(epicenter_mode).strip().lower()
+    if mode not in {"county_uniform", "population"}:
+        raise ValueError(f"Unknown epicenter_mode={epicenter_mode!r}")
+
     rng = np.random.default_rng(seed)
     epicenters: list[tuple[float, float] | None] = []
     for _, row in out.iterrows():
         fips_str = _event_fips(row)
         poly = poly_dict.get(fips_str)
-        epicenter, _ = choose_epicenter_population_mode(
-            county_fips=fips_str, poly=poly, rng=rng, pop_gdf=pop_gdf
-        )
+        if mode == "population":
+            epicenter, _ = choose_epicenter_population_mode(
+                county_fips=fips_str, poly=poly, rng=rng, pop_gdf=pop_gdf
+            )
+        else:
+            epicenter = None
         if epicenter is None and poly is not None:
             point = sample_point_in_polygon(poly, rng)
             epicenter = (float(point.y), float(point.x))
@@ -177,6 +185,7 @@ def draw_crn_events_batch2(
     cov_df: pd.DataFrame,
     poly_dict: dict,
     pop_gdf: Any,
+    epicenter_mode: str,
 ) -> pd.DataFrame:
     """
     One CRN event table for Batch-2.
@@ -231,6 +240,7 @@ def draw_crn_events_batch2(
         cov_df=cov_df,
         poly_dict=poly_dict,
         pop_gdf=pop_gdf,
+        epicenter_mode=epicenter_mode,
         strict=False,
     )
     if boot_state.empty:
@@ -256,6 +266,7 @@ def draw_replay_events_batch2(
     cov_df: pd.DataFrame,
     poly_dict: dict,
     pop_gdf: Any,
+    epicenter_mode: str,
 ) -> pd.DataFrame:
     """Replay every observed event once; randomize only its within-county epicenter."""
     if not {"state", "year"}.issubset(outages_all.columns) or not {
@@ -297,6 +308,7 @@ def draw_replay_events_batch2(
         cov_df=cov_df,
         poly_dict=poly_dict,
         pop_gdf=pop_gdf,
+        epicenter_mode=epicenter_mode,
         strict=True,
     )
     if len(replay) != len(observed):
@@ -356,6 +368,7 @@ def run_unit_batch2(
     force: bool = False,
     write_events: bool = False,
     event_mode: str = "lambda_bootstrap",
+    epicenter_mode: str = "population",
 ) -> str:
     """
     Baseline-only Batch-2 run for one unit.
@@ -380,6 +393,9 @@ def run_unit_batch2(
         raise ValueError(f"Unknown event_mode={event_mode!r}")
     if event_mode == "replay" and year_outage is None:
         raise ValueError("Replay mode requires a specific outage year")
+    epicenter_mode = str(epicenter_mode).strip().lower()
+    if epicenter_mode not in {"county_uniform", "population"}:
+        raise ValueError(f"Unknown epicenter_mode={epicenter_mode!r}")
 
     outages_df = ensure_outage_year(
         pd.read_csv(
@@ -398,7 +414,9 @@ def run_unit_batch2(
     cov_df = load_coverage_history(project_root)
     county_polys = load_county_polygons(project_root)
     poly_dict = {row["fips_str"]: row["geometry"] for _, row in county_polys.iterrows()}
-    pop_gdf = require_pop_units(project_root)
+    pop_gdf = (
+        require_pop_units(project_root) if epicenter_mode == "population" else None
+    )
     git = _git_commit(project_root)
 
     target_states = list(member_states) if member_states else [label]
@@ -438,6 +456,7 @@ def run_unit_batch2(
                 cov_df=cov_df,
                 poly_dict=poly_dict,
                 pop_gdf=pop_gdf,
+                epicenter_mode=epicenter_mode,
             )
         else:
             events = draw_crn_events_batch2(
@@ -454,6 +473,7 @@ def run_unit_batch2(
                 cov_df=cov_df,
                 poly_dict=poly_dict,
                 pop_gdf=pop_gdf,
+                epicenter_mode=epicenter_mode,
             )
         if events.empty:
             continue
@@ -555,6 +575,7 @@ def run_unit_batch2(
         "n_fb_state_pooled": int(mdf["n_fb_state_pooled"].sum()),
         "git_commit": git,
         "event_mode": event_mode,
+        "epicenter_mode": epicenter_mode,
     }
     pd.DataFrame([summary]).to_csv(summary_path, index=False)
     (unit_out / "manifest.json").write_text(
@@ -564,6 +585,7 @@ def run_unit_batch2(
                 "pkl_path": str(pkl_path),
                 "member_states": target_states,
                 "event_mode": event_mode,
+                "epicenter_mode": epicenter_mode,
                 "seed_rule": (
                     "C: sim_id (Batch1-compatible); "
                     "A/B: md5(unit|year_outage|sim)[:8]"

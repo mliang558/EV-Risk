@@ -28,6 +28,11 @@ def main() -> None:
     parser.add_argument("--out", required=True)
     parser.add_argument("--expected-sims", type=int, default=100)
     parser.add_argument("--expected-units", type=int, default=45)
+    parser.add_argument(
+        "--expected-epicenter-mode",
+        choices=("county_uniform", "population"),
+        default=None,
+    )
     args = parser.parse_args()
 
     out = Path(args.out).resolve()
@@ -39,6 +44,11 @@ def main() -> None:
         raise ValueError(f"Canonical output must contain baseline only: {manifest.get('scenarios')}")
     if not certifies_state_sum(manifest):
         raise ValueError("Manifest does not certify the state sum-rate definition")
+    if (
+        args.expected_epicenter_mode is not None
+        and manifest.get("epicenter") != args.expected_epicenter_mode
+    ):
+        raise ValueError("Manifest does not certify the requested epicenter mode")
 
     unit_dirs = sorted(p.parent for p in out.glob("*/metrics_baseline.csv"))
     if len(unit_dirs) != args.expected_units:

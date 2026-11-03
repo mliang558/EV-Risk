@@ -19,6 +19,11 @@ def main() -> None:
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--expected-sims", type=int, default=100)
     parser.add_argument("--expected-units", type=int, default=45)
+    parser.add_argument(
+        "--expected-epicenter-mode",
+        choices=("county_uniform", "population"),
+        default=None,
+    )
     args = parser.parse_args()
 
     manifest_path = args.out / "batch_manifest.json"
@@ -27,6 +32,11 @@ def main() -> None:
         raise ValueError("Manifest is not a B-only run")
     if manifest.get("event_mode") != "replay":
         raise ValueError("Manifest does not certify replay mode")
+    if (
+        args.expected_epicenter_mode is not None
+        and manifest.get("epicenter_mode") != args.expected_epicenter_mode
+    ):
+        raise ValueError("Manifest does not certify the requested epicenter mode")
     if sorted(manifest.get("years", [])) != list(YEARS):
         raise ValueError("Manifest does not contain outage years 2018--2023")
     if int(manifest.get("n_sims", -1)) != args.expected_sims:
@@ -48,6 +58,12 @@ def main() -> None:
             raise ValueError(f"Wrong scenario identity: {summary_path}")
         if str(summary["event_mode"]) != "replay":
             raise ValueError(f"Non-replay output: {summary_path}")
+        if (
+            args.expected_epicenter_mode is not None
+            and str(summary.get("epicenter_mode", ""))
+            != args.expected_epicenter_mode
+        ):
+            raise ValueError(f"Wrong epicenter mode: {summary_path}")
         if int(summary["n_sims"]) != args.expected_sims:
             raise ValueError(f"Wrong simulation count: {summary_path}")
         if any(int(summary[name]) != 0 for name in (
@@ -87,7 +103,8 @@ def main() -> None:
 
     print(
         f"PASS: replay B has {expected} unit-years, fixed 2023 networks, "
-        f"{args.expected_sims} replications, no severity fallbacks, and valid losses"
+        f"{args.expected_sims} replications, no severity fallbacks, "
+        f"epicenter={manifest.get('epicenter_mode')}, and valid losses"
     )
 
 

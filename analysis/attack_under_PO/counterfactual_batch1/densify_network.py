@@ -37,7 +37,7 @@ from analysis.build_charging_network_step2 import (
 CLUSTER_RADIUS_M = 10_000.0
 CORRIDOR_SPACING_M = 50 * 1609.344
 CACHE_SCHEMA = "fhwa_ev_afc_50mi_10km_unit_boundary_v4"
-DEMAND_CACHE_SCHEMA = "population_primary_road_matched_count_10km_v4"
+DEMAND_CACHE_SCHEMA = "population_primary_road_matched_count_10km_v5"
 DEMAND_CANDIDATE_SPACING_M = CLUSTER_RADIUS_M / 2
 AFC_FILENAME = "ntad_ev_alternative_fuel_corridors_round8_2025.geojson"
 PRIMARY_ROADS_FILENAME = "tl_2023_us_primaryroads.zip"
@@ -677,7 +677,57 @@ def _matched_count_candidate_indices(
             best, best_population = selected, score
         if len(best) == target and order is orders[0]:
             break
-    return best
+    if len(best) == target:
+        return best
+    exact = _exact_matched_count_candidate_indices(
+        candidates, existing, target, min_distance_m
+    )
+    return exact if len(exact) == target else best
+
+
+def _exact_matched_count_candidate_indices(
+    candidates: pd.DataFrame,
+    existing: np.ndarray,
+    target: int,
+    min_distance_m: float,
+) -> np.ndarray:
+    """Maximize covered population subject to exact count and 10 km conflicts."""
+    from scipy.optimize import Bounds, LinearConstraint, milp
+    from scipy.sparse import coo_matrix, csr_matrix, vstack
+
+    coordinates = candidates[["lat", "lon"]].to_numpy(dtype=float)
+    eligible = np.flatnonzero(
+        _minimum_distances(coordinates, existing) >= min_distance_m
+    )
+    if len(eligible) < target:
+        return np.empty(0, dtype=int)
+
+    eligible_coordinates = coordinates[eligible]
+    distances = _geodesic_distance_matrix(eligible_coordinates)
+    edge_i, edge_j = np.where(np.triu(distances < min_distance_m, k=1))
+    n_edges, n_sites = len(edge_i), len(eligible)
+    rows = np.repeat(np.arange(n_edges), 2)
+    columns = np.column_stack((edge_i, edge_j)).ravel()
+    conflicts = coo_matrix(
+        (np.ones(2 * n_edges), (rows, columns)), shape=(n_edges, n_sites)
+    ).tocsr()
+    count = csr_matrix(np.ones((1, n_sites)))
+    constraints = vstack((conflicts, count), format="csr")
+    lower = np.concatenate((np.full(n_edges, -np.inf), [float(target)]))
+    upper = np.concatenate((np.ones(n_edges), [float(target)]))
+    population = candidates.iloc[eligible]["population"].to_numpy(dtype=float)
+
+    result = milp(
+        c=-np.log1p(population),
+        integrality=np.ones(n_sites),
+        bounds=Bounds(0, 1),
+        constraints=LinearConstraint(constraints, lower, upper),
+        options={"time_limit": 180, "mip_rel_gap": 0.0},
+    )
+    if result.x is None:
+        return np.empty(0, dtype=int)
+    selected = np.flatnonzero(result.x > 0.5)
+    return eligible[selected] if len(selected) == target else np.empty(0, dtype=int)
 
 
 def _select_demand_sites(

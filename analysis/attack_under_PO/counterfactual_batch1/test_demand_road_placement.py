@@ -6,6 +6,7 @@ from shapely.geometry import LineString, Polygon
 
 from analysis.attack_under_PO.counterfactual_batch1.densify_network import (
     _demand_road_candidates,
+    _exact_matched_count_candidate_indices,
     _matched_count_candidate_indices,
     _select_demand_sites,
 )
@@ -78,3 +79,10 @@ def test_matched_count_search_avoids_population_greedy_blocking():
         min_distance_m=15_000,
     )
     assert set(selected) == {0, 2}
+    exact = _exact_matched_count_candidate_indices(
+        candidates,
+        existing=np.asarray([[20.0, 20.0]]),
+        target=2,
+        min_distance_m=15_000,
+    )
+    assert set(exact) == {0, 2}

@@ -49,7 +49,7 @@ def test_candidates_are_inside_tracts_and_on_roads():
 
 def test_selection_follows_population_order_and_adds_on_road_candidates():
     tracts, roads = _inputs()
-    sites, eligible, candidates, _ = _select_demand_sites(
+    sites, eligible, candidates, _, spacing = _select_demand_sites(
         tracts,
         roads,
         existing=np.asarray([[20.0, 20.0]]),
@@ -59,6 +59,7 @@ def test_selection_follows_population_order_and_adds_on_road_candidates():
     assert len(candidates) > 2
     assert eligible >= 3
     assert len(sites) == 3
+    assert spacing == 5_000
     assert sites[0, 1] < sites[1, 1]
 
 

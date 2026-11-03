@@ -37,7 +37,7 @@ from analysis.build_charging_network_step2 import (
 CLUSTER_RADIUS_M = 10_000.0
 CORRIDOR_SPACING_M = 50 * 1609.344
 CACHE_SCHEMA = "fhwa_ev_afc_50mi_10km_unit_boundary_v4"
-DEMAND_CACHE_SCHEMA = "population_primary_road_matched_count_10km_v7"
+DEMAND_CACHE_SCHEMA = "population_primary_road_adaptive_5km_1km_10km_v8"
 DEMAND_CANDIDATE_SPACING_M = CLUSTER_RADIUS_M / 10
 AFC_FILENAME = "ntad_ev_alternative_fuel_corridors_round8_2025.geojson"
 PRIMARY_ROADS_FILENAME = "tl_2023_us_primaryroads.zip"
@@ -782,62 +782,81 @@ def _select_demand_sites(
     existing: np.ndarray,
     target: int,
     min_distance_m: float,
-) -> tuple[np.ndarray, int, pd.DataFrame, np.ndarray]:
+) -> tuple[np.ndarray, int, pd.DataFrame, np.ndarray, float | None]:
     """Select population-ranked road candidates subject to node spacing."""
     if target <= 0 or pop_units.empty:
-        return np.empty((0, 2)), 0, pd.DataFrame(), np.empty(0)
+        return np.empty((0, 2)), 0, pd.DataFrame(), np.empty(0), None
     primary = _demand_road_candidates(pop_units, primary_roads)
 
-    selected = []
-    selected_snap_distances = []
-    occupied = existing.copy()
-
-    def add_from(table: pd.DataFrame) -> None:
-        nonlocal occupied
-        for row in table.itertuples(index=False):
-            lat, lon = float(row.lat), float(row.lon)
-            point = np.asarray([[lat, lon]], dtype=float)
+    def select_from(candidates: pd.DataFrame, optimize: bool):
+        selected = []
+        snap_distances = []
+        occupied = existing.copy()
+        for row in candidates.itertuples(index=False):
+            point = np.asarray([[float(row.lat), float(row.lon)]], dtype=float)
             if _minimum_distances(point, occupied)[0] < min_distance_m:
                 continue
             selected.append(point[0])
-            selected_snap_distances.append(float(row.road_snap_distance_m))
+            snap_distances.append(float(row.road_snap_distance_m))
             occupied = np.vstack((occupied, point))
             if len(selected) == target:
-                return
+                break
+        if len(selected) < target and optimize:
+            matched = _matched_count_candidate_indices(
+                candidates, existing, target, min_distance_m
+            )
+            selected = candidates.loc[
+                matched, ["lat", "lon"]
+            ].to_numpy(dtype=float).tolist()
+            snap_distances = candidates.loc[
+                matched, "road_snap_distance_m"
+            ].to_numpy(dtype=float).tolist()
+        return selected, snap_distances
 
-    # Preserve the original rule whenever one on-road point per tract suffices.
-    add_from(primary)
-    supplemental = pd.DataFrame(columns=primary.columns)
-    if len(selected) < target:
-        supplemental = _supplemental_demand_road_candidates(
-            pop_units, primary_roads, spacing_m=min_distance_m / 10
+    def supplemental(spacing_m: float) -> pd.DataFrame:
+        table = _supplemental_demand_road_candidates(
+            pop_units, primary_roads, spacing_m=spacing_m
         )
-        if not supplemental.empty and not primary.empty:
-            primary_keys = set(zip(primary["lat"].round(8), primary["lon"].round(8)))
-            supplemental = supplemental[
-                [
-                    (round(row.lat, 8), round(row.lon, 8)) not in primary_keys
-                    for row in supplemental.itertuples(index=False)
-                ]
-            ].reset_index(drop=True)
-        add_from(supplemental)
+        if table.empty or primary.empty:
+            return table
+        primary_keys = set(zip(primary["lat"].round(8), primary["lon"].round(8)))
+        keep = [
+            (round(row.lat, 8), round(row.lon, 8)) not in primary_keys
+            for row in table.itertuples(index=False)
+        ]
+        return table[keep].reset_index(drop=True)
 
-    candidates = pd.concat([primary, supplemental], ignore_index=True)
+    # One rule for every state: one point per tract, then 5 km candidates,
+    # then 1 km candidates only when the coarser search cannot match the count.
+    candidates = primary
+    selected, selected_snap_distances = select_from(candidates, optimize=False)
+    used_spacing = None
     if len(selected) < target:
-        matched = _matched_count_candidate_indices(
-            candidates, existing, target, min_distance_m
+        used_spacing = min_distance_m / 2
+        candidates = pd.concat(
+            [primary, supplemental(used_spacing)], ignore_index=True
         )
-        selected = candidates.loc[matched, ["lat", "lon"]].to_numpy(dtype=float).tolist()
-        selected_snap_distances = (
-            candidates.loc[matched, "road_snap_distance_m"].to_numpy(dtype=float).tolist()
+        selected, selected_snap_distances = select_from(candidates, optimize=True)
+    if len(selected) < target:
+        used_spacing = min_distance_m / 10
+        candidates = pd.concat(
+            [primary, supplemental(used_spacing)], ignore_index=True
         )
+        selected, selected_snap_distances = select_from(candidates, optimize=True)
+
     if candidates.empty:
         eligible = 0
     else:
         coordinates = candidates[["lat", "lon"]].to_numpy(dtype=float)
         eligible = int((_minimum_distances(coordinates, existing) >= min_distance_m).sum())
     sites = np.asarray(selected) if selected else np.empty((0, 2))
-    return sites, eligible, candidates, np.asarray(selected_snap_distances)
+    return (
+        sites,
+        eligible,
+        candidates,
+        np.asarray(selected_snap_distances),
+        used_spacing,
+    )
 
 
 def build_demand_network(
@@ -851,7 +870,7 @@ def build_demand_network(
 ) -> tuple[nx.Graph, dict]:
     """Add a matched number of nodes on roads in the most populated tracts."""
     existing, _ = _node_coords(graph)
-    sites, eligible_count, candidates, snap_distances = _select_demand_sites(
+    sites, eligible_count, candidates, snap_distances, candidate_spacing = _select_demand_sites(
         pop_units, primary_roads, existing, int(target), cluster_radius_m
     )
     if len(sites) != int(target):
@@ -894,7 +913,7 @@ def build_demand_network(
         "n_population_tracts": int(len(pop_units)),
         "n_candidates": int(len(candidates)),
         "n_candidates_eligible": int(eligible_count),
-        "candidate_spacing_m": float(cluster_radius_m / 10),
+        "candidate_spacing_m": candidate_spacing,
         "cluster_radius_m": float(cluster_radius_m),
         "min_distance_to_existing_m": (
             float(_minimum_distances(sites, existing).min()) if added else None

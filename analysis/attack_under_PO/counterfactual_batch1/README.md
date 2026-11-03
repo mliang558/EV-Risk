@@ -16,8 +16,12 @@ draw across the baseline and all intervention doses.
   population, and each tract contributes its nearest Census TIGER/Line primary-
   road point to the tract's internal representative point. Sites must lie on a
   primary road inside the tract and remain at least 10 km from original and
-  newly added hypernodes. A run fails rather than silently accepting a node-
-  count shortfall. This isolates placement strategy from expansion size.
+  newly added hypernodes. If one candidate per tract cannot match the corridor
+  count, the same rule for every state samples on-road candidates first at
+  5 km and then, only if needed, at 1 km resolution. Candidate resolution does
+  not relax the final 10 km separation. A run fails rather than silently
+  accepting a node-count shortfall. This isolates placement strategy from
+  expansion size.
 - **Severity reduction (`CF-S`)** reduces affected customers by the same doses,
   then reapplies coverage correction, the county-customer cap, and the radius
   calculation.

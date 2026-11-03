@@ -1,63 +1,50 @@
-# Batch 2 — year-specific outage persistence (A / B / C)
+# Batch 2 — temporal robustness
 
-Baseline only. Reuses Batch-1 loss evaluation, epicenter (tract population),
-removal cache `(graph_id, frozenset(S))`, and metrics. New package:
-`analysis/attack_under_PO/batch2_yearly/`. Outputs: `results_batch2_yearly/`.
+With the recommended `EVENT_MODE=replay`, this package runs baseline attacks
+under three temporal designs:
 
-## Designs
+| Family | Network | Outage input | Purpose |
+| --- | --- | --- | --- |
+| A | year `t` | observed events in year `t` | combined network- and outage-year comparison |
+| B | fixed 2023 | observed events in year `t` | outage-year sensitivity |
+| C | year `t` | pooled 2018–2023 posterior and event pool | network evolution under a fixed outage environment |
 
-| Family | Network | Outages | λ |
-|--------|---------|---------|---|
-| **A** | year t | year t | `λ_c,t = λ_c × r[s,t]` |
-| **B** | **2023** | year t | same r scaling |
-| **C** | year t | **2018–2023 pooled** | unscaled `λ_c` (Batch-1-like) |
+## Recommended historical replay for A/B
 
-- `r[s,t] = N[s,t] / mean_t N[s,t]` with `mean_t r = 1`
-- **A_2023 ≡ B_2023**: run once under A, copy to B, assert metrics match
-- B years when A is included: **2018–2022** only (2023 shared)
+Set `EVENT_MODE=replay`. In each Monte Carlo replication, every cleaned event
+from the selected year is used exactly once. Its county, severity, duration,
+and disruption radius remain fixed. Only its within-county, population-weighted
+epicenter is redrawn. There is no Bayesian lambda draw, event-count draw,
+bootstrap resampling, or fallback to another county or year.
 
-## Seeds (CRN)
+The runner checks that the event identities, counties, durations, radii, and
+event count are identical across replications. Use a new output directory so
+replay results cannot mix with the legacy lambda-bootstrap results.
 
-- **A/B:** `md5(unit|year_outage|sim)[:8]` — network year independent ⇒ A/B same events
-- **C:** `sim_id` — matches Batch-1 baseline
-
-## Severity fallback
-
-1. `county_year_pool[c,t]`
-2. `state_year_pool[s,t]`
-3. 6-year state pool (flag `state_pooled`)
-
-## Smoke → full
+Run the experiment directly with Python. There is no shell wrapper or hidden
+environment-variable configuration:
 
 ```bash
-cd /opt/data_repo/mliang_work/Pro_directory
-export PYTHONPATH="$PWD/analysis:$PWD/analysis/attack_under_PO"
-export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
-
-# smoke (in-memory asserts + optional short run)
-FORCE=1 ONLY=VT,TX N_SIMS=2 FAMILIES="A B C" \
-  OUT=$PWD/results_batch2_yearly_smoke \
-  bash analysis/attack_under_PO/batch2_yearly/run_cluster.sh
-python analysis/attack_under_PO/batch2_yearly/smoke_test.py \
-  --batch-dir results_batch2_yearly_smoke --units VT,TX
-
-# full
-N_SIMS=100 WORKERS=45 NO_EVENTS=1 FAMILIES="A B C" \
-  OUT=$PWD/results_batch2_yearly \
-  bash analysis/attack_under_PO/batch2_yearly/run_cluster.sh
-
-python analysis/attack_under_PO/batch2_yearly/analyze_batch2.py \
-  --batch-dir results_batch2_yearly
+python analysis/attack_under_PO/batch2_yearly/run_parallel.py --event-mode replay --experiments B --years 2018 2019 2020 2021 2022 2023 --network-root outputs/1029-network-data-preprocessing-10km-geodesic-2018-2023 --out results_replay_B_1029 --n-sims 100 --workers 45
 ```
 
-## Layout
+For a quick check before the full run:
 
+```bash
+python analysis/attack_under_PO/batch2_yearly/run_parallel.py --event-mode replay --experiments B --years 2022 2023 --only TX --network-root outputs/1029-network-data-preprocessing-10km-geodesic-2018-2023 --out results_replay_B_1029_smoke --n-sims 2 --workers 1
 ```
-results_batch2_yearly/
-  r_st_table.csv
-  A/net2018_out2018/<unit>/metrics_baseline.csv
-  B/net2023_out2018/<unit>/...
-  B/net2023_out2023/<unit>/...   # copy of A_2023
-  C/net2018_pooled/<unit>/...
-  analysis_batch2/
-```
+
+Completed outputs are skipped automatically. Add `--force` only when an
+existing result must intentionally be recomputed. Per-simulation event files
+are omitted by default; add `--write-events` only when they are needed for an
+event-level audit.
+
+Outputs include `batch_manifest.json`, `observed_event_counts.csv`, and one
+directory per network/outage-year combination. Each unit directory contains
+`metrics_baseline.csv`, `summary.csv`, and `manifest.json`.
+
+## Legacy mode
+
+`EVENT_MODE=lambda_bootstrap` preserves the earlier A/B/C implementation. It
+draws posterior county rates and resamples historical events. It is retained
+only for reproducibility and is not the recommended A/B specification.

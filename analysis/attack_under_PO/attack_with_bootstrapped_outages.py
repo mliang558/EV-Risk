@@ -107,6 +107,26 @@ def lcc_fraction(G_attacked: nx.Graph, n_vertices: int) -> float:
     return len(max(nx.connected_components(und), key=len)) / n_vertices
 
 
+def global_efficiency_fixed_denominator(
+    G_attacked: nx.Graph,
+    n_reference: int,
+) -> float:
+    """Global efficiency after attack, normalized by the original node count.
+
+    NetworkX normalizes ``global_efficiency`` by the number of nodes remaining
+    in the supplied graph. For node-removal attacks that can make efficiency
+    rise merely because removed node pairs disappear from the denominator.
+    Here removed-node pairs instead contribute zero, as do disconnected pairs.
+    """
+    n_remaining = G_attacked.number_of_nodes()
+    if n_reference < 2 or n_remaining < 2:
+        return 0.0
+    remaining_efficiency = float(nx.global_efficiency(G_attacked))
+    return remaining_efficiency * (
+        n_remaining * (n_remaining - 1) / (n_reference * (n_reference - 1))
+    )
+
+
 def compute_event_loss(
     G: nx.Graph,
     epicenter: Tuple[float, float],
@@ -161,10 +181,7 @@ def compute_event_loss(
     else:
         G_temp = G.copy()
         G_temp.remove_nodes_from(affected)
-        if G_temp.number_of_nodes() == 0:
-            eff_after = 0.0
-        else:
-            eff_after = nx.global_efficiency(G_temp)
+        eff_after = global_efficiency_fixed_denominator(G_temp, n_vertices)
         lcc_frac_val = lcc_fraction(G_temp, n_vertices)
         if removal_cache is not None:
             removal_cache[key] = (float(eff_after), float(lcc_frac_val))
@@ -202,10 +219,7 @@ def compute_event_loss_with_capacity(
 
     G_temp = G.copy()
     G_temp.remove_nodes_from(affected)
-    if G_temp.number_of_nodes() == 0:
-        eff_after = 0.0
-    else:
-        eff_after = nx.global_efficiency(G_temp)
+    eff_after = global_efficiency_fixed_denominator(G_temp, n_vertices)
 
     eff_loss = eff_before - eff_after
     pct_loss = eff_loss / eff_before if eff_before > 0 else 0.0

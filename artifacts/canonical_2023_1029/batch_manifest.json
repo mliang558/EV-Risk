@@ -1,0 +1,32 @@
+{
+  "batch": "network_year_pooled_outages",
+  "analysis_role": "canonical",
+  "created_utc": "2026-10-29T19:16:33.967568+00:00",
+  "network_year": 2023,
+  "outage_pool": "pooled_2018_2023",
+  "posterior_file": "advi_results_2018_2023/county_advi_posterior.nc",
+  "county_metadata_file": "advi_results_2018_2023/county_estimates_advi.csv",
+  "state_rate_definition": "Lambda_s = sum_c lambda_c",
+  "county_assignment": "P(c|s) = lambda_c / Lambda_s",
+  "event_bootstrap": "with replacement from selected county; state pool fallback",
+  "epicenter_mode": "population",
+  "shortest_path": "unweighted hop count",
+  "efficiency_denominator": "fixed baseline N*(N-1) after node removal",
+  "event_loss": "((E0-E_after)/E0) * duration_hours",
+  "annual_loss_W": "sum(event_loss)",
+  "reported_L_tilde": "annual_loss_W / baseline_n_nodes",
+  "cf_s_definition": "N_affected -x% => R_c *= sqrt(1-x)",
+  "n_sims": 100,
+  "workers_requested": 1,
+  "workers_used": 1,
+  "n_units": 45,
+  "scenarios": [
+    "baseline"
+  ],
+  "network_root": "/opt/data_repo/mliang_work/EV-Risk-review/outputs/1029-network-data-preprocessing-10km-geodesic-2018-2023",
+  "out": "/opt/data_repo/mliang_work/EV-Risk-review/results_canonical_1029_2023_pooled_sumlambda_n100",
+  "git_commit": "506367ad39b28f83c7d4c6de15260aee119eceea",
+  "no_events": true,
+  "metrics_include_P_hit": true,
+  "note_no_events": "Event gz optional; metrics_*.csv still has n_events, n_hit_events, P_hit, L_event, E_loss_given_hit, total_rel_loss_x_duration, total_rel_loss_x_duration_hit for \u00a74.3."
+}

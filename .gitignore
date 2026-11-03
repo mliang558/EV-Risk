@@ -23,6 +23,8 @@ build/
 
 # 通用数据格式
 *.csv
+!artifacts/batch2_yearly/analysis_batch2/*.csv
+!artifacts/cf_batch1_2023_pooled/analysis_denominator_audit/*.csv
 *.parquet
 *.xlsx
 *.xls

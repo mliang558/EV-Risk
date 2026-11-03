@@ -138,8 +138,7 @@ def draw_lambda_realization(
 
 
 def aggregate_state_lambda(df_draw: pd.DataFrame) -> pd.DataFrame:
-    """
-    Aggregate county-level λ_draw to state-level λ (simple county average).
+    """Aggregate county rates to the total annual state event rate.
 
     Parameters
     ----------
@@ -149,19 +148,19 @@ def aggregate_state_lambda(df_draw: pd.DataFrame) -> pd.DataFrame:
     Returns
     -------
     state_df : DataFrame
-        Columns: ['state', 'n_counties', 'lambda_state_mean_draw'].
+        Columns: ['state', 'n_counties', 'lambda_state_sum_draw'].
 
-    Notes
-    -----
-    - 这里先用“按县均值”作为州 λ 的一个简单定义。
-      如果以后需要按人口加权，只要在这里改成加权平均即可。
+    The data model counts county-level outage events. Therefore a state's
+    annual event rate is Λ_s = Σ_c λ_c. Using a county mean here would
+    simulate the event count of a typical county rather than the event count
+    observed across the state.
     """
     if "state" not in df_draw.columns:
         raise ValueError("df_draw must contain a 'state' column for aggregation.")
 
     grouped = df_draw.groupby("state", observed=True)["lambda_draw"]
     state_df = grouped.agg(
-        lambda_state_mean_draw="mean",
+        lambda_state_sum_draw="sum",
         n_counties="count",
     ).reset_index()
 
@@ -175,7 +174,7 @@ def draw_state_event_counts(state_df: pd.DataFrame, random_state: int | None = N
     Parameters
     ----------
     state_df : DataFrame
-        Must contain column 'lambda_state_mean_draw' (events/year).
+        Must contain column 'lambda_state_sum_draw' (county events/year).
     random_state : int, optional
         Seed for reproducibility.
 
@@ -184,11 +183,11 @@ def draw_state_event_counts(state_df: pd.DataFrame, random_state: int | None = N
     state_df_with_n : DataFrame
         Original columns plus 'n_events_draw' (int).
     """
-    if "lambda_state_mean_draw" not in state_df.columns:
-        raise ValueError("state_df must contain 'lambda_state_mean_draw' column.")
+    if "lambda_state_sum_draw" not in state_df.columns:
+        raise ValueError("state_df must contain 'lambda_state_sum_draw' column.")
 
     rng = np.random.default_rng(random_state)
-    lam = state_df["lambda_state_mean_draw"].values
+    lam = state_df["lambda_state_sum_draw"].values
     n_events = rng.poisson(lam)  # T = 1 year, so n ~ Poisson(λ_s)
 
     state_df = state_df.copy()
@@ -234,11 +233,14 @@ def bootstrap_state_outages(
     event_pool: str = "all",
     severe_top_pct: float = 0.10,
 ) -> pd.DataFrame:
-    """
-    For each state, bootstrap outage events n_s times using historical data.
+    """Bootstrap the simulated annual county-event process within each state.
 
-    Here we ignore counties for simplicity and sample from that state's
-    cleaned outage events (each row = one outage occurrence).
+    The state count follows Poisson(sum_c lambda_c). Conditional on that total,
+    counties are selected with probability lambda_c / sum_c lambda_c. This is
+    the standard Poisson-splitting construction and is distributionally
+    equivalent to drawing independent Poisson(lambda_c) county counts. Event
+    severity and duration are then sampled, with replacement, from the
+    selected county's cleaned historical events.
 
     Parameters
     ----------
@@ -379,9 +381,9 @@ def main() -> None:
     - Save to CSV for downstream simulations
     """
     county_df, flat_lam = load_posterior()
-    df_draw = draw_lambda_realization(county_df, flat_lam)
+    df_draw = draw_lambda_realization(county_df, flat_lam, random_state=0)
     state_df = aggregate_state_lambda(df_draw)
-    state_df = draw_state_event_counts(state_df)
+    state_df = draw_state_event_counts(state_df, random_state=0)
 
     script_path = Path(__file__).resolve()
     project_root = script_path.parents[2]

@@ -1,9 +1,5 @@
-"""
-Counterfactual Batch 1 — new package (does not overwrite existing MC pipeline).
+"""2023 corridor-expansion and severity-reduction experiments."""
 
-Batch 1: 2023 network × pooled outages, CRN across CF-D / CF-S / CF-T / U / K.
-"""
+from .scenarios import batch1_scenarios
 
-from counterfactual_batch1.scenarios import batch1_scenarios, filter_scenarios
-
-__all__ = ["batch1_scenarios", "filter_scenarios"]
+__all__ = ["batch1_scenarios"]

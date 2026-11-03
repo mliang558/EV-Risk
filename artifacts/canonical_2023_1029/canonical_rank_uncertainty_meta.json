@@ -1,0 +1,12 @@
+{
+  "method": "paired nonparametric bootstrap over aligned Monte Carlo sim_id values",
+  "bootstrap_replicates": 5000,
+  "seed": 20261029,
+  "n_units": 45,
+  "n_simulations": 100,
+  "metrics": {
+    "L_cum": "L_tilde",
+    "L_event": "L_event"
+  },
+  "output": "canonical_rank_uncertainty.csv"
+}

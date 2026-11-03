@@ -156,7 +156,11 @@ def compute_radius_for_state_events(
         how="left",
     )
 
-    df["theta_s"] = df["theta_s"].fillna(1.0).clip(lower=1e-3, upper=1.0)
+    missing_coverage = df["theta_s"].isna()
+    if missing_coverage.any():
+        years = sorted(df.loc[missing_coverage, "year"].astype(int).unique())
+        raise ValueError(f"Missing coverage for {state_name}: years={years}")
+    df["theta_s"] = df["theta_s"].clip(lower=1e-3, upper=1.0)
 
     # Effective impacted customers: min(Nd/theta_s, MCC)
     Nd_eff = (df["Nd"] / df["theta_s"]).clip(lower=0.0)
@@ -287,7 +291,7 @@ def run_monte_carlo_for_state(
         else:
             df_draw = build_raw_lambda_draw(county_post_df)
         state_df = aggregate_state_lambda(df_draw)
-        state_df = draw_state_event_counts(state_df)
+        state_df = draw_state_event_counts(state_df, random_state=sim_id)
 
         # 2) Bootstrap outages (all states), then filter our target state
         boot_all = bootstrap_state_outages(

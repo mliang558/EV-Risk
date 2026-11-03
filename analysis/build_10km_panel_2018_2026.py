@@ -1,21 +1,25 @@
 #!/usr/bin/env python3
 """
-Build state-level charging networks (2018–2026) with 10 km hypernode clustering.
+Build the 2018–2023 analytical-unit network panel with 10 km hypernodes.
 
 Per unit
 --------
-- Greedy 10 km clustering (EPSG:3857), Voronoi adjacency (Delaunay fallback)
-- Edge weight w_ij = d_ij / d_max
+- Deterministic greedy 10 km clustering using WGS84 geodesic distance
+- Voronoi adjacency in a local azimuthal-equidistant projection
+- Edge distance d_ij is WGS84 geodesic distance
 
-Fixed merges (all years)
+Combined analytical units (all years)
 ------------------------
-- Maryland  : DC + DE + MD  -> network_Maryland.pkl
-- Dakotas   : SD + ND       -> network_Dakotas.pkl
-- Connecticut : RI + CT     -> network_Connecticut.pkl
+- Maryland    : DC + DE + MD -> network_Maryland.pkl
+- Dakotas     : SD + ND      -> network_Dakotas.pkl
+- Connecticut : RI + CT      -> network_Connecticut.pkl
+
+Member-state station rows are combined before clustering and Voronoi
+construction; combined units are not disjoint unions of state graphs.
 
 Output (default)
 ----------------
-  outputs/network_graph_10km_2018_2026/
+  outputs/1029-network-data-preprocessing-10km-geodesic-2018-2023/
     <year>/network_structures/network_<unit>.pkl
     <year>/network_summary.csv
     panel_hypernode_counts.csv
@@ -36,24 +40,28 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import networkx as nx
-import numpy as np
 import pandas as pd
 
 _PROJECT = Path(__file__).resolve().parents[1]
 if str(_PROJECT) not in sys.path:
     sys.path.insert(0, str(_PROJECT))
 
-import build_charging_network_step2 as s2  # noqa: E402
 from build_charging_network_step2 import (  # noqa: E402
-    add_hypernode_to_graph,
+    build_region_graph,
     load_step1_stations,
 )
 from prepare_stations import default_csv_path, prepare_stations  # noqa: E402
 from run_charging_network import STATES_ORDER, load_raw_csv  # noqa: E402
 
 CLUSTER_RADIUS_M = 10_000.0
-DEFAULT_OUT_ROOT = _PROJECT / "outputs" / "network_graph_10km_2018_2026"
-YEARS_DEFAULT = list(range(2018, 2027))  # 2018–2026
+NETWORK_BUILD_DATE = "2026-10-29"
+NETWORK_VERSION = "1029-geodesic-v1"
+DEFAULT_OUT_ROOT = (
+    _PROJECT
+    / "outputs"
+    / "1029-network-data-preprocessing-10km-geodesic-2018-2023"
+)
+YEARS_DEFAULT = list(range(2018, 2024))
 
 
 @dataclass(frozen=True)
@@ -76,158 +84,19 @@ MIN_NODES_DEFAULT = 3
 MIN_NODES_BY_ABBR = {"DC": 1, "DE": 1, "ND": 1, "SD": 1, "RI": 1}
 
 
-def _graph_from_clusters(
-    centers: np.ndarray,
-    cluster_caps: np.ndarray,
-    cluster_counts: np.ndarray,
-    cluster_l1: np.ndarray,
-    cluster_l2: np.ndarray,
-    cluster_dc: np.ndarray,
-    coords_3857: np.ndarray,
-    state: str,
-    n_raw: int,
-    radius_m: float,
-) -> tuple[nx.Graph, dict]:
-    n_nodes = len(centers)
-    if n_nodes == 0:
-        return nx.Graph(), {
-            "state": state,
-            "n_raw": n_raw,
-            "n_nodes": 0,
-            "n_edges": 0,
-            "cluster_radius_m": float(radius_m),
-            "dist_max_m": 1.0,
-            "adjacency": "empty",
-        }
-
-    dist_matrix = np.linalg.norm(coords_3857[:, None] - coords_3857[None, :], axis=2)
-    dist_max = float(np.max(dist_matrix)) if n_nodes > 1 else 1.0
-    if dist_max <= 0:
-        dist_max = 1.0
-
-    G = nx.Graph()
-    for i in range(n_nodes):
-        add_hypernode_to_graph(
-            G,
-            i,
-            centers[i],
-            float(cluster_caps[i]),
-            int(cluster_counts[i]),
-            float(cluster_l1[i]),
-            float(cluster_l2[i]),
-            float(cluster_dc[i]),
-        )
-    for a in range(n_nodes):
-        for b in range(a + 1, n_nodes):
-            d_m = float(dist_matrix[a, b])
-            G.add_edge(a, b, weight=d_m / dist_max, distance_m=d_m)
-
-    return G, {
-        "state": state,
-        "n_raw": n_raw,
-        "n_nodes": n_nodes,
-        "n_edges": G.number_of_edges(),
-        "cluster_radius_m": float(radius_m),
-        "dist_max_m": dist_max,
-        "adjacency": "complete_small" if n_nodes < 4 else "voronoi",
-    }
-
-
 def build_state_graph_flex(
     df: pd.DataFrame,
     state: str,
     radius_m: float,
 ) -> tuple[nx.Graph | None, dict | None]:
     mn = MIN_NODES_BY_ABBR.get(state, MIN_NODES_DEFAULT)
-    sub = df[df["state"] == state]
-    if len(sub) < 1:
-        return None, None
-
-    coords_ll = sub[["lat", "lon"]].values.astype(np.float64)
-    capacities = sub["capacity"].values.astype(np.float64)
-    n_l1 = sub["n_l1"].values.astype(np.float64)
-    n_l2 = sub["n_l2"].values.astype(np.float64)
-    n_dc = sub["n_dc"].values.astype(np.float64)
-    n_raw = len(sub)
-    centers, cluster_caps, cluster_counts, cl1, cl2, cdc = s2.cluster_stations(
-        coords_ll, capacities, radius_m=radius_m, n_l1=n_l1, n_l2=n_l2, n_dc=n_dc
+    return build_region_graph(
+        df,
+        [state],
+        state,
+        radius_m=radius_m,
+        min_nodes=mn,
     )
-    n_nodes = len(centers)
-    if n_nodes < mn:
-        return None, None
-
-    coords_3857 = s2._to_epsg3857_meters(centers[:, 0], centers[:, 1])
-
-    if n_nodes >= 4:
-        orig = s2.MIN_NODES
-        s2.MIN_NODES = mn
-        try:
-            return s2.build_state_graph(df, state, radius_m=radius_m)
-        finally:
-            s2.MIN_NODES = orig
-
-    G, stats = _graph_from_clusters(
-        centers, cluster_caps, cluster_counts, cl1, cl2, cdc, coords_3857, state, n_raw, radius_m
-    )
-    return G, stats
-
-
-def _empty_state_payload(abbr: str, year: int) -> dict:
-    return {
-        "network": nx.Graph(),
-        "meta": {
-            "state": abbr,
-            "n_raw": 0,
-            "n_nodes": 0,
-            "n_edges": 0,
-            "year": year,
-            "cluster_radius_m": CLUSTER_RADIUS_M,
-            "edge_weight": "normalized_distance",
-            "adjacency": "empty",
-        },
-    }
-
-
-def merge_payloads(by_abbr: dict[str, dict], unit: MergeUnit, year: int) -> dict:
-    G_out = nx.Graph()
-    offset = 0
-    member_stats: list[dict] = []
-
-    for abbr in unit.member_abbr:
-        payload = by_abbr.get(abbr) or _empty_state_payload(abbr, year)
-        G = payload["network"]
-        mapping = {n: n + offset for n in G.nodes()}
-        G_part = nx.relabel_nodes(G, mapping, copy=True)
-        for node in G_part.nodes:
-            G_part.nodes[node]["member_state"] = abbr
-        G_out = nx.compose(G_out, G_part)
-        member_stats.append(
-            {
-                "member": abbr,
-                "n_nodes": int(G.number_of_nodes()),
-                "n_edges": int(G.number_of_edges()),
-            }
-        )
-        offset += G.number_of_nodes()
-
-    return {
-        "network": G_out,
-        "meta": {
-            "year": year,
-            "unit": unit.pkl_stem,
-            "display_name": unit.display_name,
-            "member_states": list(unit.member_abbr),
-            "n_nodes": int(G_out.number_of_nodes()),
-            "n_edges": int(G_out.number_of_edges()),
-            "cluster_radius_m": CLUSTER_RADIUS_M,
-            "edge_weight": "normalized_distance",
-            "adjacency": "voronoi",
-            "merge_method": "disjoint_union",
-            "node_features": "lat,lon,n_l1,n_l2,n_dc,capacity,n_stations",
-            "capacity_formula": "5*n_l1+25*n_l2+300*n_dc",
-            "members": member_stats,
-        },
-    }
 
 
 def ensure_stations_csv(year: int, processed_dir: Path) -> Path:
@@ -266,6 +135,8 @@ def build_year(year: int, out_root: Path, processed_dir: Path, verbose: bool = T
         print(f"Stations: {stations_path} ({len(df):,} rows)")
 
     for abbr in STATES_ORDER:
+        if abbr in MERGED_ALL_MEMBERS:
+            continue
         G, stats = build_state_graph_flex(df, abbr, radius_m=CLUSTER_RADIUS_M)
         if G is None or stats is None:
             if verbose:
@@ -276,14 +147,17 @@ def build_year(year: int, out_root: Path, processed_dir: Path, verbose: bool = T
             "meta": {
                 **stats,
                 "year": year,
-                "edge_weight": "normalized_distance",
+                "network_version": NETWORK_VERSION,
+                "network_build_date": NETWORK_BUILD_DATE,
+                "edge_weight": "normalized_geodesic_distance",
+                "analysis_adjacency": "unweighted",
                 "node_features": "lat,lon,n_l1,n_l2,n_dc,capacity,n_stations",
                 "capacity_formula": "5*n_l1+25*n_l2+300*n_dc",
             },
         }
 
     for abbr in STATES_ORDER:
-        if abbr in MERGED_ALL_MEMBERS or abbr not in by_abbr:
+        if abbr not in by_abbr:
             continue
         pkl_path = net_dir / f"network_{abbr}.pkl"
         with open(pkl_path, "wb") as f:
@@ -299,13 +173,44 @@ def build_year(year: int, out_root: Path, processed_dir: Path, verbose: bool = T
                 "n_nodes": st["n_nodes"],
                 "n_edges": st["n_edges"],
                 "cluster_radius_m": CLUSTER_RADIUS_M,
+                "network_version": NETWORK_VERSION,
+                "network_build_date": NETWORK_BUILD_DATE,
+                "cluster_distance": st["cluster_distance"],
+                "adjacency": st["adjacency"],
+                "is_connected": nx.is_connected(by_abbr[abbr]["network"]),
+                "n_components": nx.number_connected_components(by_abbr[abbr]["network"]),
             }
         )
         if verbose:
             print(f"  {abbr}: nodes={st['n_nodes']} edges={st['n_edges']}")
 
     for unit in MERGE_UNITS:
-        payload = merge_payloads(by_abbr, unit, year)
+        G, stats = build_region_graph(
+            df,
+            list(unit.member_abbr),
+            unit.pkl_stem,
+            radius_m=CLUSTER_RADIUS_M,
+            min_nodes=1,
+        )
+        if G is None or stats is None:
+            raise RuntimeError(f"Could not build combined unit {unit.pkl_stem} for {year}")
+        payload = {
+            "network": G,
+            "meta": {
+                **stats,
+                "year": year,
+                "network_version": NETWORK_VERSION,
+                "network_build_date": NETWORK_BUILD_DATE,
+                "unit": unit.pkl_stem,
+                "display_name": unit.display_name,
+                "member_states": list(unit.member_abbr),
+                "edge_weight": "normalized_geodesic_distance",
+                "analysis_adjacency": "unweighted",
+                "merge_method": "combine_stations_before_clustering",
+                "node_features": "lat,lon,n_l1,n_l2,n_dc,capacity,n_stations",
+                "capacity_formula": "5*n_l1+25*n_l2+300*n_dc",
+            },
+        }
         with open(net_dir / f"network_{unit.pkl_stem}.pkl", "wb") as f:
             pickle.dump(payload, f)
         meta = payload["meta"]
@@ -315,22 +220,21 @@ def build_year(year: int, out_root: Path, processed_dir: Path, verbose: bool = T
                 "unit": unit.pkl_stem,
                 "display_name": unit.display_name,
                 "members": ",".join(unit.member_abbr),
-                "n_raw": sum(
-                    by_abbr.get(m, {"meta": {"n_raw": 0}})["meta"]["n_raw"]
-                    for m in unit.member_abbr
-                ),
+                "n_raw": meta["n_raw"],
                 "n_nodes": meta["n_nodes"],
                 "n_edges": meta["n_edges"],
                 "cluster_radius_m": CLUSTER_RADIUS_M,
+                "network_version": NETWORK_VERSION,
+                "network_build_date": NETWORK_BUILD_DATE,
+                "cluster_distance": meta["cluster_distance"],
+                "adjacency": meta["adjacency"],
+                "is_connected": nx.is_connected(G),
+                "n_components": nx.number_connected_components(G),
             }
         )
         if verbose:
-            parts = ", ".join(
-                f"{m}={by_abbr[m]['meta']['n_nodes']}"
-                for m in unit.member_abbr
-                if m in by_abbr
-            )
-            print(f"  {unit.display_name} ({parts}) -> nodes={meta['n_nodes']}")
+            members = "+".join(unit.member_abbr)
+            print(f"  {unit.display_name} ({members}) -> nodes={meta['n_nodes']}")
 
     summary = pd.DataFrame(rows)
     summary.to_csv(year_dir / "network_summary.csv", index=False)
@@ -340,7 +244,9 @@ def build_year(year: int, out_root: Path, processed_dir: Path, verbose: bool = T
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="10 km networks 2018–2026 with fixed merges")
+    parser = argparse.ArgumentParser(
+        description="2018-2023 10 km geodesic network-data preprocessing"
+    )
     parser.add_argument("--years", type=int, nargs="+", default=YEARS_DEFAULT)
     parser.add_argument("--out", type=str, default=str(DEFAULT_OUT_ROOT))
     parser.add_argument("--processed-dir", type=str, default="data/processed")
@@ -355,9 +261,13 @@ def main() -> None:
 
     out_root.mkdir(parents=True, exist_ok=True)
     (out_root / "README.txt").write_text(
-        "10 km hypernode clustering; edge weight w_ij = d_ij / d_max.\n"
+        f"Network version: {NETWORK_VERSION}\n"
+        f"Method date: {NETWORK_BUILD_DATE}\n"
+        "Deterministic 10 km hypernode clustering using WGS84 geodesic distance.\n"
+        "Voronoi adjacency uses a local azimuthal-equidistant projection per unit.\n"
+        "Canonical efficiency analysis treats edges as unweighted. Stored edge distances are WGS84 geodesic.\n"
         "Node features: n_l1,n_l2,n_dc,capacity (capacity=5*L1+25*L2+300*DC summed in cluster).\n"
-        "Merges (all years):\n"
+        "Combined units (stations combined before clustering and graph construction):\n"
         "  Maryland    = DC + DE + MD\n"
         "  Dakotas     = SD + ND\n"
         "  Connecticut = RI + CT\n"

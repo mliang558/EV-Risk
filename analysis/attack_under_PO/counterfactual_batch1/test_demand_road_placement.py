@@ -86,3 +86,10 @@ def test_matched_count_search_avoids_population_greedy_blocking():
         min_distance_m=15_000,
     )
     assert set(exact) == {0, 2}
+    capacity = _exact_matched_count_candidate_indices(
+        candidates,
+        existing=np.asarray([[20.0, 20.0]]),
+        target=3,
+        min_distance_m=15_000,
+    )
+    assert set(capacity) == {0, 2}

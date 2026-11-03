@@ -37,7 +37,7 @@ from analysis.build_charging_network_step2 import (
 CLUSTER_RADIUS_M = 10_000.0
 CORRIDOR_SPACING_M = 50 * 1609.344
 CACHE_SCHEMA = "fhwa_ev_afc_50mi_10km_unit_boundary_v4"
-DEMAND_CACHE_SCHEMA = "population_primary_road_matched_count_10km_v5"
+DEMAND_CACHE_SCHEMA = "population_primary_road_matched_count_10km_v6"
 DEMAND_CANDIDATE_SPACING_M = CLUSTER_RADIUS_M / 2
 AFC_FILENAME = "ntad_ev_alternative_fuel_corridors_round8_2025.geojson"
 PRIMARY_ROADS_FILENAME = "tl_2023_us_primaryroads.zip"
@@ -712,22 +712,68 @@ def _exact_matched_count_candidate_indices(
         (np.ones(2 * n_edges), (rows, columns)), shape=(n_edges, n_sites)
     ).tocsr()
     count = csr_matrix(np.ones((1, n_sites)))
-    constraints = vstack((conflicts, count), format="csr")
-    lower = np.concatenate((np.full(n_edges, -np.inf), [float(target)]))
-    upper = np.concatenate((np.ones(n_edges), [float(target)]))
+    exact_constraints = vstack((conflicts, count), format="csr")
+    exact_lower = np.concatenate((np.full(n_edges, -np.inf), [float(target)]))
+    exact_upper = np.concatenate((np.ones(n_edges), [float(target)]))
     population = candidates.iloc[eligible]["population"].to_numpy(dtype=float)
 
     result = milp(
         c=-np.log1p(population),
         integrality=np.ones(n_sites),
         bounds=Bounds(0, 1),
-        constraints=LinearConstraint(constraints, lower, upper),
+        constraints=LinearConstraint(exact_constraints, exact_lower, exact_upper),
         options={"time_limit": 180, "mip_rel_gap": 0.0},
     )
-    if result.x is None:
-        return np.empty(0, dtype=int)
-    selected = np.flatnonzero(result.x > 0.5)
-    return eligible[selected] if len(selected) == target else np.empty(0, dtype=int)
+    selected = np.flatnonzero(result.x > 0.5) if result.x is not None else np.empty(0, int)
+    if len(selected) == target:
+        return eligible[selected]
+    if result.status != 2:
+        raise RuntimeError(
+            "Exact Demand placement did not prove feasibility or infeasibility: "
+            f"status={result.status}, message={result.message}"
+        )
+
+    # The requested count is infeasible. Solve the maximum-cardinality problem
+    # so the reported capacity is exact rather than an arbitrary greedy shortfall.
+    conflict_constraint = LinearConstraint(
+        conflicts, np.full(n_edges, -np.inf), np.ones(n_edges)
+    )
+    capacity_result = milp(
+        c=-np.ones(n_sites),
+        integrality=np.ones(n_sites),
+        bounds=Bounds(0, 1),
+        constraints=conflict_constraint,
+        options={"time_limit": 180, "mip_rel_gap": 0.0},
+    )
+    if capacity_result.status != 0 or capacity_result.x is None:
+        raise RuntimeError(
+            "Could not determine exact Demand placement capacity: "
+            f"status={capacity_result.status}, message={capacity_result.message}"
+        )
+    capacity = int(np.rint(capacity_result.x).sum())
+
+    # Among maximum-cardinality layouts, retain the one covering most population.
+    capacity_constraints = vstack((conflicts, count), format="csr")
+    capacity_lower = np.concatenate((np.full(n_edges, -np.inf), [float(capacity)]))
+    capacity_upper = np.concatenate((np.ones(n_edges), [float(capacity)]))
+    population_result = milp(
+        c=-np.log1p(population),
+        integrality=np.ones(n_sites),
+        bounds=Bounds(0, 1),
+        constraints=LinearConstraint(
+            capacity_constraints, capacity_lower, capacity_upper
+        ),
+        options={"time_limit": 180, "mip_rel_gap": 0.0},
+    )
+    if population_result.x is None:
+        selected = np.flatnonzero(capacity_result.x > 0.5)
+    else:
+        selected = np.flatnonzero(population_result.x > 0.5)
+    print(
+        f"[Demand capacity] requested={target} exact_maximum={capacity}",
+        flush=True,
+    )
+    return eligible[selected]
 
 
 def _select_demand_sites(
